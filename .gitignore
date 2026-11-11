@@ -1,0 +1,13 @@
+# Development API keys: never commit these
+Secrets.env
+.env
+.env.*
+
+# Xcode per-user state and build output
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# macOS
+.DS_Store
