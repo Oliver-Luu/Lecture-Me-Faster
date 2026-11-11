@@ -12,6 +12,7 @@ build/
 # macOS
 .DS_Store
 
-# Personal Claude instructions
+# Personal Claude instructions and session context
 claude.md
 CLAUDE.md
+CLAUDE_CONTEXT.md
