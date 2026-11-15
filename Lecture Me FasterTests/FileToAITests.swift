@@ -50,7 +50,36 @@ struct FileToAITests {
 
     @Test func promptOmitsSlideIntroForAudioOnlyLectures() {
         let parts = FileToAI.promptParts(title: "Audio", transcript: transcript, frames: [])
-        #expect(parts.count == 2)
+        let texts = parts.compactMap { part -> String? in if case .text(let t) = part { t } else { nil } }
+        #expect(texts.count == parts.count, "No images")
+        #expect(!texts.contains { $0.contains("slide and board captures") })
+        // Saying so outright keeps smaller models from describing slides or materials that don't exist.
+        #expect(texts.contains("No slides are included."))
+        #expect(texts.contains("No supporting materials are included."))
+        #expect(texts.last?.hasPrefix("Transcript:") == true)
+    }
+
+    @Test func everyLevelForbidsInventedContent() {
+        for level in NoteDetail.allCases {
+            let prompt = FileToAI.systemPrompt(detail: level)
+            #expect(prompt.contains("Never invent deadlines"))
+            #expect(prompt.contains("Leave out any section"))
+            #expect(!prompt.contains("Include any logistics"), "Logistics only if the professor actually mentions them")
+        }
+    }
+
+    @Test func multiFileLecturesTellTheModelWhereEachPartStarts() throws {
+        let lectureParts = [LecturePart(name: "Week 3 pt1", startSeconds: 0), LecturePart(name: "Week 3 pt2", startSeconds: 2700)]
+        let parts = FileToAI.promptParts(title: "Week 3", transcript: transcript, frames: [], lectureParts: lectureParts)
+        guard case .text(let header) = try #require(parts.first) else { Issue.record("Expected text first"); return }
+        #expect(header.contains("Lecture: Week 3"))
+        #expect(header.contains("recorded as 2 files"))
+        #expect(header.contains("Part 1, \"Week 3 pt1\", starts at [0:00]"))
+        #expect(header.contains("Part 2, \"Week 3 pt2\", starts at [45:00]"))
+
+        let single = FileToAI.promptParts(title: "Week 3", transcript: transcript, frames: [], lectureParts: [lectureParts[0]])
+        guard case .text(let singleHeader) = try #require(single.first) else { Issue.record("Expected text first"); return }
+        #expect(singleHeader == "Lecture file: Week 3", "One file needs no part list")
     }
 
     // MARK: Requests
@@ -109,6 +138,39 @@ struct FileToAITests {
 
         let withoutKey = try FileToAI.request(for: parts, config: config(.openAICompatible, key: ""))
         #expect(withoutKey.value(forHTTPHeaderField: "authorization") == nil)
+    }
+
+    // MARK: Note detail
+
+    @Test func eachDetailLevelGetsItsOwnInstructionsAndTheSharedRules() {
+        let prompts = NoteDetail.allCases.map { FileToAI.systemPrompt(detail: $0) }
+        #expect(Set(prompts).count == NoteDetail.allCases.count, "Every level must produce a different prompt")
+        for (level, prompt) in zip(NoteDetail.allCases, prompts) {
+            #expect(prompt.contains(level.instructions))
+            #expect(prompt.contains("The transcript is machine-generated"), "Mishearing rules apply at every level")
+            #expect(prompt.contains("cannot render tables or LaTeX"), "Formatting rules apply at every level")
+        }
+        #expect(FileToAI.systemPrompt(detail: .complete).contains("thoroughness matters more than brevity"))
+        #expect(FileToAI.systemPrompt(detail: .keyPoints).contains("Leave out derivations, worked examples"))
+    }
+
+    @Test func detailLevelsRunFromBriefToThorough() {
+        #expect(NoteDetail.allCases == [.keyPoints, .concise, .detailed, .complete])
+        #expect(NoteDetail.allCases.map(\.rawValue) == [0, 1, 2, 3], "The Settings slider maps steps 0–3 to these")
+    }
+
+    @Test func everyProviderReceivesTheChosenDetailLevel() throws {
+        let expected = FileToAI.systemPrompt(detail: .keyPoints)
+
+        let claude = try body(FileToAI.request(for: [.text("hi")], config: config(.claude), detail: .keyPoints))
+        #expect(claude["system"] as? String == expected)
+
+        for provider in [AIProvider.ollama, .openAICompatible] {
+            let json = try body(FileToAI.request(for: [.text("hi")], config: config(provider), detail: .keyPoints))
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            #expect(messages[0]["role"] as? String == "system")
+            #expect(messages[0]["content"] as? String == expected)
+        }
     }
 
     // MARK: Responses
