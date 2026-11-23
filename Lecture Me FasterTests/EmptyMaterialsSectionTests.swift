@@ -2,11 +2,10 @@ import Foundation
 import Testing
 @testable import Lecture_Me_Faster
 
-/// What was measured on Apple Intelligence (2026-11-13) and kept or turned off.
-struct SpokenCodePromptTests {
-    @Test func theUnprovenChangesAreOff() {
-        #expect(!AppleIntelligence.usesGreedySampling, "Greedy made the small model loop")
-        #expect(!FileToAI.includesSpokenCodeGuidance, "Its effect was smaller than run-to-run variation")
+/// What was measured on Apple Intelligence (2026-11-13) and kept. (The two changes that measured no
+/// better, greedy sampling and a spoken-code paragraph in the prompt, were removed on 2026-11-16.)
+struct EmptyMaterialsSectionTests {
+    @Test func thePromptHasNoSpokenCodeParagraph() {
         #expect(!FileToAI.systemPrompt(detail: .keyPoints).contains(#""b sub k" is b[k]"#))
     }
 

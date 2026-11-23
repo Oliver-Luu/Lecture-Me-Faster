@@ -27,10 +27,11 @@ struct RecentlyDeletedView: View {
                 }
             } footer: {
                 if !history.recentlyDeleted.isEmpty {
-                    Text("Lectures show the days remaining before deletion. After that time, items will be permanently deleted. This make take up to \(LectureHistory.retentionDays) days.")
+                    Text("Each lecture is deleted for good when its days run out. Until then you can restore it.")
                 }
             }
         }
+        .canvasBackground()
         // Acts on every selected row, or on the row right-clicked if it isn't selected.
         .contextMenu(forSelectionType: UUID.self) { ids in
             let ordered = ordered(ids)
@@ -52,10 +53,7 @@ struct RecentlyDeletedView: View {
         #endif
         .overlay {
             if history.recentlyDeleted.isEmpty {
-                ContentUnavailableView(
-                    "No Recently Deleted Lectures", systemImage: "trash",
-                    description: Text("Deleted lectures stay here for \(LectureHistory.retentionDays) days.")
-                )
+                EmptyState("Nothing here", "Lectures you delete stay here for \(LectureHistory.retentionDays) days, then are deleted for good.")
             }
         }
         .navigationTitle("Recently Deleted")
@@ -116,10 +114,10 @@ struct RecentlyDeletedView: View {
 
     private func row(for lecture: SavedLecture) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Metrics.tight) {
                 Text(lecture.title)
                 Text(daysLeftText(for: lecture))
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             }
             Spacer()

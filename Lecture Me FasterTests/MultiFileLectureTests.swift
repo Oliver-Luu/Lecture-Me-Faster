@@ -144,48 +144,65 @@ struct MultiFileLectureTests {
             hasAudio: true
         )
 
-        let combined = LectureSession.combine([first, second], maxFrames: 30)
+        let combined = LectureSession.combine([first, second])
         #expect(combined.parts == [LecturePart(name: "Part 1", startSeconds: 0), LecturePart(name: "Part 2", startSeconds: 600)])
         #expect(combined.frames.map(\.seconds) == [0, 300, 610])
         #expect(combined.frames.map(\.jpeg) == [Data([1]), Data([2]), Data([3])])
         #expect(combined.transcript.map(\.seconds) == [0, 590, 605])
         #expect(combined.transcript.map(\.text) == ["Welcome", "Break", "We're back"])
         #expect(combined.distinctFrameCount == 3)
-
-        let capped = LectureSession.combine([first, second], maxFrames: 2)
-        #expect(capped.frames.count == 2, "The slide limit applies to the whole lecture, not each part")
-        #expect(capped.distinctFrameCount == 3)
     }
 
-    @Test func aSilentPartAddsSlidesButASilentOnlyFileFails() async throws {
+    @Test func aSilentFileAddsItsSlides() async throws {
         let video = try await TestMedia.makeSlideVideo(slides: 2, secondsPerSlide: 4)
         defer { try? FileManager.default.removeItem(at: video) }
 
-        let part = try await LectureSession.process(video, frameOptions: .init(), isOnlyPart: false) { _, _ in }
+        let part = try await LectureSession.process(video, frameOptions: .init()) { _, _ in }
         #expect(!part.hasAudio)
         #expect(part.transcript.isEmpty)
         #expect(part.frames.count == 2)
         #expect(abs(part.duration - 8) < 0.5)
-
-        await #expect(throws: AudioToTranscription.Failure.self) {
-            _ = try await LectureSession.process(video, frameOptions: .init(), isOnlyPart: true) { _, _ in }
-        }
     }
 
-    @Test func aLectureWhosePartsAreAllSilentFails() async throws {
+    /// Before 2026-11-16 a lecture with no audio track at all failed ("no audio track"), even though its
+    /// slides were found. A screen recording without sound now gets notes from its slides.
+    @Test func aLectureWithSlidesButNoSoundIsWrittenFromItsSlides() async throws {
+        let host = "silent.lecture-me-faster.test"
+        let log = MockModelServer.start(host: host)
+        defer { MockModelServer.stop(host: host) }
         let videos = [
-            try await TestMedia.makeSlideVideo(slides: 1, secondsPerSlide: 2),
+            try await TestMedia.makeSlideVideo(slides: 2, secondsPerSlide: 4),
             try await TestMedia.makeSlideVideo(slides: 1, secondsPerSlide: 2),
         ]
         defer { videos.forEach { try? FileManager.default.removeItem(at: $0) } }
+        var stored = AppSettings.Stored()
+        stored.provider = .openAICompatible
+        stored.openAIURL = "http://\(host)/v1"
+        stored.openAIModel = "m"
         let session = LectureSession()
 
-        session.start(videos, title: "Week 3", settings: AppSettings())
+        session.start(videos, title: "Week 3", settings: AppSettings(unsaved: stored))
         #expect(session.title == "Week 3")
         #expect(session.partCount == 2)
         #expect(session.phase == .processing)
 
-        for _ in 0..<200 where session.isBusy {
+        for _ in 0..<400 where session.isBusy {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(session.phase == .done)
+        #expect(session.transcript.isEmpty)
+        #expect(session.frames.count == 3)
+        #expect(session.notes(for: .detailed) == "Reply \(log.requests.count)")
+        #expect(log.requests.last?.contains("No speech was recognized in the recording") == true)
+    }
+
+    @Test func aRecordingWithNoSoundAndNoSlidesStillFails() async throws {
+        // One flat grey picture: no speech, and nothing on screen to keep.
+        let blank = try await TestMedia.makeSlideVideo(slides: 1, secondsPerSlide: 3, blank: true)
+        defer { try? FileManager.default.removeItem(at: blank) }
+        let session = LectureSession()
+        session.start([blank], title: "Nothing", settings: AppSettings(unsaved: AppSettings.Stored()))
+        for _ in 0..<400 where session.isBusy {
             try await Task.sleep(for: .milliseconds(50))
         }
         #expect(session.phase == .failed(AudioToTranscription.Failure.noAudio.localizedDescription))

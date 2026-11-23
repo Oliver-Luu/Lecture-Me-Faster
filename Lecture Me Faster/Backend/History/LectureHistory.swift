@@ -7,6 +7,7 @@ import Observation
 ///
 ///     <root>/<id>/lecture.json    the SavedLecture record
 ///     <root>/<id>/frames/0.jpg    slide images, in the order of `frameSeconds`
+///     <root>/folders.json         the folders' names (each lecture records which folder it is in)
 ///
 /// Moving a lecture to Recently Deleted only sets its `deletedAt`. The files stay until the lecture is
 /// deleted for good, either by hand or automatically `retentionDays` after it was deleted.
@@ -17,6 +18,8 @@ import Observation
     private(set) var lectures: [SavedLecture] = []
     /// Lectures in Recently Deleted, most recently deleted first.
     private(set) var recentlyDeleted: [SavedLecture] = []
+    /// The user's folders, in name order.
+    private(set) var folders: [LectureFolder] = []
     /// The last file error, shown to the user and then cleared.
     var lastError: String?
 
@@ -62,15 +65,17 @@ import Observation
 
     /// Re-reads every lecture folder from disk. Folders whose record can't be read are ignored.
     func reload() {
-        let folders = (try? FileManager.default.contentsOfDirectory(
+        let lectureFolders = (try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
         )) ?? []
-        let all = folders.compactMap { folder -> SavedLecture? in
+        let all = lectureFolders.compactMap { folder -> SavedLecture? in
             guard let data = try? Data(contentsOf: folder.appending(path: "lecture.json")) else { return nil }
             return try? JSONDecoder().decode(SavedLecture.self, from: data)
         }
         lectures = all.filter { $0.deletedAt == nil }.sorted { $0.createdAt > $1.createdAt }
         recentlyDeleted = all.filter { $0.deletedAt != nil }.sorted { $0.deletedAt! > $1.deletedAt! }
+        let saved = (try? Data(contentsOf: foldersFile)).flatMap { try? JSONDecoder().decode([LectureFolder].self, from: $0) }
+        folders = Self.sorted(saved ?? [])
     }
 
     // MARK: Writing
@@ -158,6 +163,78 @@ import Observation
         for lecture in recentlyDeleted {
             try deletePermanently(lecture.id)
         }
+    }
+
+    // MARK: Folders
+
+    /// The lectures in a folder, newest first.
+    func lectures(in folder: LectureFolder) -> [SavedLecture] {
+        lectures.filter { $0.folderID == folder.id }
+    }
+
+    /// The lectures in no folder, newest first. A lecture whose folder no longer exists counts as unfiled.
+    var unfiledLectures: [SavedLecture] {
+        let known = Set(folders.map(\.id))
+        return lectures.filter { $0.folderID.map(known.contains) != true }
+    }
+
+    /// Makes a folder. Surrounding spaces are trimmed, an empty name becomes "New Folder", and a name
+    /// already taken gets a number ("Physics 2").
+    @discardableResult
+    func createFolder(named name: String) throws -> LectureFolder {
+        let folder = LectureFolder(id: UUID(), name: availableName(name, ignoring: nil))
+        try writeFolders(folders + [folder])
+        return folder
+    }
+
+    /// Renames a folder. An empty name, or the name it already has, is ignored.
+    func renameFolder(_ id: UUID, to newName: String) throws {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = folders.firstIndex(where: { $0.id == id }), folders[index].name != trimmed else { return }
+        var updated = folders
+        updated[index].name = availableName(trimmed, ignoring: id)
+        try writeFolders(updated)
+    }
+
+    /// Removes a folder. Its lectures are kept and go back to the unfiled list.
+    func deleteFolder(_ id: UUID) throws {
+        guard folders.contains(where: { $0.id == id }) else { return }
+        try writeFolders(folders.filter { $0.id != id })
+        try move((lectures + recentlyDeleted).filter { $0.folderID == id }.map(\.id), toFolder: nil)
+    }
+
+    /// Files lectures in a folder, or takes them out of their folders with `nil`. A failure doesn't stop
+    /// the rest; the first one is thrown at the end.
+    func move(_ ids: [UUID], toFolder folderID: UUID?) throws {
+        guard folderID == nil || folders.contains(where: { $0.id == folderID }) else { return }
+        try forEach(ids) { id in
+            guard var lecture = lecture(id), lecture.folderID != folderID else { return }
+            lecture.folderID = folderID
+            try write(lecture)
+            replace(lecture)
+        }
+    }
+
+    private func availableName(_ name: String, ignoring id: UUID?) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? "New Folder" : trimmed
+        let taken = Set(folders.filter { $0.id != id }.map { $0.name.lowercased() })
+        guard taken.contains(base.lowercased()) else { return base }
+        var number = 2
+        while taken.contains("\(base) \(number)".lowercased()) { number += 1 }
+        return "\(base) \(number)"
+    }
+
+    private static func sorted(_ folders: [LectureFolder]) -> [LectureFolder] {
+        folders.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private var foldersFile: URL { root.appending(path: "folders.json") }
+
+    private func writeFolders(_ updated: [LectureFolder]) throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode(updated).write(to: foldersFile, options: .atomic)
+        folders = Self.sorted(updated)
     }
 
     // MARK: Several at once

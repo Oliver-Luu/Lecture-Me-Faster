@@ -143,6 +143,10 @@ nonisolated struct AIConfiguration: Sendable {
     /// The model's context window in tokens, once known (see `LongLectures.contextWindow`). Ollama's
     /// `num_ctx` is never set above it.
     var contextTokens: Int?
+    /// The longest reply the model can write, when the provider says. Claude's `max_tokens` is never set above it.
+    var maxOutputTokens: Int?
+    /// Whether a Claude model takes the `effort` setting, when Anthropic's model list says.
+    var supportsEffort: Bool?
 }
 
 nonisolated func timestamp(_ seconds: Double) -> String {
@@ -154,6 +158,8 @@ nonisolated enum FileToAI {
     enum Failure: LocalizedError, Equatable {
         case api(String)
         case refused
+        /// The request succeeded but the model wrote nothing.
+        case empty
         /// HTTP 401 or 403: the key is wrong, expired, or revoked.
         case keyRejected(String)
         /// HTTP 402: the account has no credit left.
@@ -165,6 +171,7 @@ nonisolated enum FileToAI {
             switch self {
             case .api(let message): message
             case .refused: "The model declined to summarize this lecture."
+            case .empty: "The model answered with no text, so no notes were saved. Try again, or choose another model."
             case .keyRejected(let detail):
                 "The API key was rejected\(Self.quoted(detail)). It may have expired, been revoked, or been mistyped. Create a new key in your provider's console and paste it in Settings. The slides and transcript are saved, so you can write the notes again afterwards."
             case .noCredit(let detail):
@@ -189,37 +196,29 @@ nonisolated enum FileToAI {
         }
     }
 
-    /// Checks the API key before any planning, so a rejected key is reported as such. Without this check, a
-    /// failed context-window lookup fell back to a small window and the lecture was planned as hundreds of
-    /// parts. Only an explicit rejection (HTTP 401/403) throws; a network problem or a server without a
-    /// model list is left to the request itself.
-    static func verifyKey(_ config: AIConfiguration) async throws {
-        var request: URLRequest
-        switch config.provider {
-        case .claude:
-            request = URLRequest(url: config.baseURL.appending(path: "v1/models/\(config.model)"))
-            request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
-            request.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
-        case .openAICompatible where !config.apiKey.isEmpty:
-            request = URLRequest(url: config.baseURL.appending(path: "models"))
-            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "authorization")
-        default:
-            return
-        }
-        request.timeoutInterval = 20
-        guard let (data, response) = try? await URLSession.shared.data(for: request) else { return }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if [401, 402, 403].contains(status) { throw Failure.forStatus(status, detail: errorDetail(in: data)) }
-    }
-
     /// The provider's own error message from an error body (`{"error": {"message": ...}}` or `{"error": "..."}`).
-    static func errorDetail(in data: Data) -> String {
+    /// A body in neither shape gives its first 300 characters, or nothing when `orRawBody` is false.
+    static func errorDetail(in data: Data, orRawBody: Bool = true) -> String {
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         return (json?["error"] as? [String: Any])?["message"] as? String ?? json?["error"] as? String
-            ?? String(decoding: data.prefix(300), as: UTF8.self)
+            ?? (orRawBody ? String(decoding: data.prefix(300), as: UTF8.self) : "")
     }
 
-    static let claudeModels = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+    /// Shown only until Anthropic's own model list loads (or when it can't). IDs from Anthropic's model
+    /// table as of 2026-11-03.
+    static let claudeModels = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"]
+
+    /// Whether a Claude model takes `output_config.effort` when the model list didn't say. Anthropic's
+    /// reference (2026-11-03) says the setting is an error on Sonnet 4.5, Haiku 4.5 and older models.
+    static func claudeTakesEffort(_ model: String) -> Bool {
+        !["claude-haiku-4-5", "claude-sonnet-4-5", "claude-3"].contains { model.hasPrefix($0) }
+    }
+
+    /// The Claude models Anthropic's reference (2026-11-03) lists for the server-side refusal fallback.
+    /// Others (Haiku, and models from before it existed) are sent without it rather than risk a rejected request.
+    static func claudeHasRefusalFallback(_ model: String) -> Bool {
+        ["claude-fable-", "claude-mythos-", "claude-opus-5", "claude-sonnet-5-5"].contains { model.hasPrefix($0) }
+    }
 
     static func summarize(
         title: String,
@@ -283,15 +282,9 @@ nonisolated enum FileToAI {
 
         \(detail.instructions)
 
-        \(sharedInstructions)\(includesSpokenCodeGuidance ? "\n\n" + spokenCodeGuidance : "")
+        \(sharedInstructions)
         """
     }
-
-    /// Whether the prompt tells the model to turn spoken code and math into symbols. Off: on a real
-    /// 89-minute lecture with Apple Intelligence (2026-11-13) two runs with it differed more than with it
-    /// and without it (about 11 of 16 key facts, then a worse, 1,382-word set), and "copy the code from the
-    /// slide" made it copy garbled handwriting recognition word for word. Kept as a switch for measuring.
-    nonisolated(unsafe) static var includesSpokenCodeGuidance = false
 
     /// Removes a "From the materials" section when the lecture has no materials. The prompt says to leave it
     /// out, but Apple Intelligence wrote one ("There was nothing to write notes from") in 4 of 6 runs.
@@ -317,16 +310,6 @@ nonisolated enum FileToAI {
         }
         return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
-
-    /// Small models copied spoken code word for word ("B sub K", "star B plus K", "sturcher" for strchr).
-    static let spokenCodeGuidance = """
-        Code and math in the transcript are spoken aloud, so write them the way they are written, not the way \
-        they were said: "star p" is *p, "b sub k" is b[k], "ampersand x" is &x, "p plus plus" is p++, \
-        "x squared" is x², "not equals" is !=. When a slide shows the code or formula, copy it exactly from the \
-        slide. Write names exactly as the slides spell them (variables, functions, keywords), including their \
-        capitalization: if a slide has da and strchr, never write DA or "sturcher". State a fact about code only \
-        when the transcript or slides say it; don't infer rules from a single example.
-        """
 
     private static let sharedInstructions = """
         Use only what is in the transcript, slides, and materials you are given. Never invent deadlines, exam \
@@ -569,10 +552,6 @@ nonisolated enum FileToAI {
 
     // MARK: Requests
 
-    static func request(for parts: [Part], config: AIConfiguration, detail: NoteDetail = .detailed) throws -> URLRequest {
-        try request(for: parts, config: config, system: systemPrompt(detail: detail))
-    }
-
     static func request(for parts: [Part], config: AIConfiguration, system systemPrompt: String) throws -> URLRequest {
         let path: String
         var headers = ["content-type": "application/json"]
@@ -587,14 +566,18 @@ nonisolated enum FileToAI {
             headers["anthropic-version"] = "2026-10-21"
             var claudeBody: [String: Any] = [
                 "model": config.model,
-                "max_tokens": 64000,
+                // Never more than the model can write (Haiku 4.5: 64,000; current models: 128,000).
+                "max_tokens": min(claudeMaxTokens, config.maxOutputTokens ?? claudeMaxTokens),
                 "stream": true,
-                "output_config": ["effort": "medium"],
                 "system": systemPrompt,
                 "messages": [["role": "user", "content": parts.map(claudeBlock)]],
             ]
-            // Haiku has no server-side refusal fallback; the other models reroute a declined request automatically.
-            if !config.model.contains("haiku") {
+            // Older models reject the effort setting.
+            if config.supportsEffort ?? claudeTakesEffort(config.model) {
+                claudeBody["output_config"] = ["effort": "medium"]
+            }
+            // The newest models reroute a request their safety checks decline; Haiku and older models can't.
+            if claudeHasRefusalFallback(config.model) {
                 headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
                 claudeBody["fallbacks"] = "default"
             }
@@ -611,12 +594,15 @@ nonisolated enum FileToAI {
                 }
             }
             let prompt = text.joined(separator: "\n")
-            // Ollama silently truncates input beyond num_ctx, so size the window to fit the whole lecture.
-            let estimatedTokens = prompt.count / 3 + images.count * 1000 + 6000
+            // Ollama silently truncates input beyond num_ctx, so size the window to fit the whole lecture,
+            // its instructions, and the same room for the notes that the plan keeps free.
+            let window = config.contextTokens ?? LongLectures.maxLocalContextTokens
+            let estimatedTokens = (prompt.count + systemPrompt.count) / 3 + images.count * 1000 + 1000
+                + LongLectures.outputReserve(provider: .ollama, contextTokens: window)
             body = [
                 "model": config.model,
                 "stream": true,
-                "options": ["num_ctx": min(max(estimatedTokens, 8192), config.contextTokens ?? LongLectures.maxLocalContextTokens)],
+                "options": ["num_ctx": min(max(estimatedTokens, 8192), window)],
                 "messages": [
                     ["role": "system", "content": systemPrompt],
                     ["role": "user", "content": prompt, "images": images],
@@ -648,6 +634,9 @@ nonisolated enum FileToAI {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
+
+    /// The app's `max_tokens` for Claude: long enough for Complete notes, and what the plan keeps free.
+    static let claudeMaxTokens = 64_000
 
     private static func claudeBlock(_ part: Part) -> [String: Any] {
         switch part {
@@ -737,6 +726,8 @@ nonisolated struct AvailableModel: Identifiable, Equatable, Sendable {
     var maxOutputTokens: Int? = nil
     /// Whether the model can see images (the slides), when the provider says.
     var acceptsImages: Bool? = nil
+    /// Whether a Claude model takes the `effort` setting, when Anthropic says.
+    var supportsEffort: Bool? = nil
     /// A short description from the provider (OpenRouter), or the model's size (Ollama).
     var summary: String? = nil
 
@@ -786,7 +777,96 @@ nonisolated enum ModelCatalog {
         case .openAICompatible:
             var request = URLRequest(url: config.baseURL.appending(path: "models"))
             if !config.apiKey.isEmpty { request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "authorization") }
-            return try parseOpenAIModels(try await fetch(request))
+            let models = try parseOpenAIModels(try await fetch(request))
+            // Gemini's OpenAI-format list has no context windows; Google's own list does.
+            guard config.baseURL.host() == geminiHost, !config.apiKey.isEmpty,
+                  let limits = try? await geminiLimits(apiKey: config.apiKey) else { return models }
+            return addingGeminiLimits(limits, to: models)
+        }
+    }
+
+    // MARK: Gemini's limits
+
+    static let geminiHost = "generativelanguage.googleapis.com"
+
+    /// A Gemini model's limits from Google's own model list, by model name without "models/".
+    struct GeminiLimits: Equatable {
+        var input: Int?
+        var output: Int?
+    }
+
+    /// `GET /v1beta/models?key=…&pageSize=1000` (the key goes in the address, as Google documents):
+    /// `models[].name` ("models/gemini-…"), `inputTokenLimit`, `outputTokenLimit`. Checked 2026-11-16 at
+    /// aistudio.google.com/api-reference/models and …/models/list-models.
+    private static func geminiLimits(apiKey: String) async throws -> [String: GeminiLimits] {
+        var limits: [String: GeminiLimits] = [:]
+        var pageToken: String?
+        repeat {
+            var url = URL(string: "https://\(geminiHost)/v1beta/models")!
+            url.append(queryItems: [URLQueryItem(name: "key", value: apiKey), URLQueryItem(name: "pageSize", value: "1000")]
+                + (pageToken.map { [URLQueryItem(name: "pageToken", value: $0)] } ?? []))
+            let page = try parseGeminiModels(try await fetch(URLRequest(url: url)))
+            limits.merge(page.limits) { $1 }
+            pageToken = page.nextPageToken
+        } while pageToken != nil
+        return limits
+    }
+
+    static func parseGeminiModels(_ data: Data) throws -> (limits: [String: GeminiLimits], nextPageToken: String?) {
+        struct Page: Decodable {
+            struct Model: Decodable {
+                let name: String
+                let inputTokenLimit: Int?
+                let outputTokenLimit: Int?
+            }
+            let models: [Model]?
+            let nextPageToken: String?
+        }
+        let page = try JSONDecoder().decode(Page.self, from: data)
+        let limits = (page.models ?? []).map {
+            (bareGeminiName($0.name), GeminiLimits(input: $0.inputTokenLimit, output: $0.outputTokenLimit))
+        }
+        return (Dictionary(limits) { $1 }, page.nextPageToken?.isEmpty == false ? page.nextPageToken : nil)
+    }
+
+    /// Fills in the context window and reply limit of each listed model that Google's list knows.
+    static func addingGeminiLimits(_ limits: [String: GeminiLimits], to models: [AvailableModel]) -> [AvailableModel] {
+        models.map { model in
+            guard let limit = limits[bareGeminiName(model.id)] else { return model }
+            var model = model
+            model.contextTokens = model.contextTokens ?? limit.input
+            model.maxOutputTokens = model.maxOutputTokens ?? limit.output
+            return model
+        }
+    }
+
+    private static func bareGeminiName(_ name: String) -> String {
+        name.hasPrefix("models/") ? String(name.dropFirst("models/".count)) : name
+    }
+
+    // MARK: Before writing
+
+    /// Asks the provider about the chosen model once, before notes are written: its context window, its
+    /// reply limit, and whether it sees images. (Three separate requests asked for these before.)
+    /// - Throws only when the provider rejects the key or account (HTTP 401, 402, 403), so that is
+    ///   reported as such instead of the lecture being planned for a window that couldn't be looked up.
+    /// - Returns nil when the provider can't be reached or doesn't list the model; the request itself
+    ///   then reports any real problem.
+    static func check(_ config: AIConfiguration) async throws -> AvailableModel? {
+        do {
+            switch config.provider {
+            case .apple, .claude, .ollama:
+                return try await details(of: config.model, for: config)
+            case .openAICompatible:
+                // Only some services (OpenRouter, Gemini) say anything beyond the name, and only in the list.
+                return try await models(for: config).first { $0.id == config.model }
+            }
+        } catch Failure.status(let status, let detail) where [401, 402, 403].contains(status) {
+            // A local server without keys that answers 401 to its model list is left to the request.
+            if config.provider == .openAICompatible, config.apiKey.isEmpty { return nil }
+            throw FileToAI.Failure.forStatus(status, detail: detail)
+        } catch {
+            return nil
         }
     }
 
@@ -814,30 +894,13 @@ nonisolated enum ModelCatalog {
         }
     }
 
-    /// Whether the chosen model can see images: `true`/`false` when the provider says, `nil` when it
-    /// doesn't say or can't be reached (then the slides are sent as images and the request is retried as
-    /// text if the provider rejects them).
-    static func acceptsImages(_ config: AIConfiguration) async -> Bool? {
-        switch config.provider {
-        case .apple:
-            return true
-        case .claude, .ollama:
-            return (try? await details(of: config.model, for: config))?.acceptsImages
-        case .openAICompatible:
-            // Only some services (OpenRouter) say, and only in the model list.
-            return (try? await models(for: config))?.first { $0.id == config.model }?.acceptsImages
-        }
-    }
-
     private static func fetch(_ request: URLRequest) async throws -> Data {
         var request = request
         request.timeoutInterval = 20
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            let detail = (json?["error"] as? [String: Any])?["message"] as? String ?? json?["error"] as? String ?? ""
-            throw Failure.status(status, detail)
+            throw Failure.status(status, FileToAI.errorDetail(in: data, orRawBody: false))
         }
         return data
     }
@@ -855,6 +918,7 @@ nonisolated enum ModelCatalog {
         struct Capabilities: Decodable {
             struct Supported: Decodable { let supported: Bool? }
             let image_input: Supported?
+            let effort: Supported?
         }
         let id: String
         let display_name: String?
@@ -865,7 +929,8 @@ nonisolated enum ModelCatalog {
         var model: AvailableModel {
             AvailableModel(
                 id: id, displayName: display_name, contextTokens: max_input_tokens,
-                maxOutputTokens: max_tokens, acceptsImages: capabilities?.image_input?.supported
+                maxOutputTokens: max_tokens, acceptsImages: capabilities?.image_input?.supported,
+                supportsEffort: capabilities?.effort?.supported
             )
         }
     }

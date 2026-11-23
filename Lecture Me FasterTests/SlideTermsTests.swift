@@ -96,7 +96,7 @@ struct SlideTermsTests {
             LectureFrame(seconds: 10, jpeg: Data([0, 1, 2])),  // not an image: read as empty, not a failure
             LectureFrame(seconds: 20, jpeg: try jpeg(TestDocuments.image(of: ["Ornstein-Uhlenbeck Process"]))),
         ]
-        let texts = await VideoToFrames.readText(in: frames)
+        let texts = await VideoToFrames.analyze(frames).map(\.text)
         #expect(texts.count == 3)
         #expect(texts[0].contains("Kolmogorov"))
         #expect(texts[1].isEmpty)

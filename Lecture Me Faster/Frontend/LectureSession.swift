@@ -124,6 +124,8 @@ import UniformTypeIdentifiers
     }
 
     private var task: Task<Void, Never>?
+    /// Goes up each time the session is cleared, so progress reported late by a stopped lecture is ignored.
+    private var generation = 0
 
     /// True while a lecture is being processed or its notes are being written.
     var isBusy: Bool { phase == .processing || phase == .summarizing }
@@ -167,6 +169,7 @@ import UniformTypeIdentifiers
         phase = .processing
         // Every distinct slide is kept; the image limit is applied when the notes are written.
         let frameOptions = VideoToFrames.Options()
+        let generation = generation
 
         run {
             let allFiles = urls + materials
@@ -178,42 +181,50 @@ import UniformTypeIdentifiers
             self.isReadingMaterials = true
             for (index, url) in materials.enumerated() {
                 self.currentMaterial = index
-                self.documents.append(await Self.readMaterial(url))
+                let document = await Self.readMaterial(url)
+                // Stopped meanwhile (Cancel, or a new lecture started): leave the session alone.
+                try Task.checkCancellation()
+                self.documents.append(document)
             }
             self.isReadingMaterials = false
             let hasMaterialText = self.documents.contains { !$0.text.isEmpty }
 
             // Several files at once: transcription measured 3.2x faster with 4 recordings at a time.
-            // A silent recording is fine when other files supply text (e.g. slides-only video + PDF).
-            let mustHaveAudio = urls.count == 1 && !hasMaterialText
             let concurrency = Self.partConcurrency(urls)
             let pieces = Self.transcriptionPieces(fileCount: urls.count, concurrency: concurrency)
             let audioPieces = settings.stored.transcribeInPieces ? pieces : 1
             let results = try await Self.inOrder(urls, concurrency: concurrency) { index, url in
-                await MainActor.run { self.runningParts.append(index) }
+                await MainActor.run {
+                    if self.generation == generation { self.runningParts.append(index) }
+                }
                 defer {
                     Task { @MainActor in
+                        guard self.generation == generation else { return }
                         self.runningParts.removeAll { $0 == index }
                         self.finishedPartCount += 1
                     }
                 }
                 return try await Self.process(
-                    url, frameOptions: frameOptions, isOnlyPart: mustHaveAudio,
-                    transcriptionPieces: audioPieces, scanPieces: pieces
+                    url, frameOptions: frameOptions, transcriptionPieces: audioPieces, scanPieces: pieces
                 ) { kind, value in
                     Task { @MainActor in
-                        guard index < self.partFrameProgress.count else { return }
+                        guard self.generation == generation, index < self.partFrameProgress.count else { return }
                         if kind == .frames { self.partFrameProgress[index] = value } else { self.partTranscriptProgress[index] = value }
                     }
                 }
             }
-            guard results.contains(where: { $0.hasAudio }) || hasMaterialText else {
+            // A stopped lecture must not be saved or sent to the model. (A cancelled transcription can
+            // return the part it had finished instead of failing.)
+            try Task.checkCancellation()
+            // A silent recording is fine when anything else gives the notes something to say: another
+            // recording's speech, the materials, or its own slides (a screen recording with no sound).
+            guard results.contains(where: { $0.hasAudio || !$0.frames.isEmpty }) || hasMaterialText else {
                 throw urls.isEmpty ? Failure.noText : AudioToTranscription.Failure.noAudio
             }
 
             // Each recording was already capped for its own length, so joining them thins nothing more:
             // a lecture of several recordings keeps every recording's slides.
-            let combined = Self.combine(results, maxFrames: .max)
+            let combined = Self.combine(results)
             self.frames = combined.frames
             self.slideAnalyses = combined.analyses
             self.distinctFrameCount = combined.distinctFrameCount
@@ -250,6 +261,7 @@ import UniformTypeIdentifiers
     /// Other levels' notes are kept.
     func resummarize(settings: AppSettings, detail: NoteDetail, splitApproved: Bool = false) {
         task?.cancel()
+        isReplanning = false
         // Mark the level as being written now, not when the task starts, so buttons disable at once.
         liveNotes = ""
         writingDetail = detail
@@ -271,7 +283,8 @@ import UniformTypeIdentifiers
         task?.cancel()
         isReplanning = true
         run {
-            defer { self.isReplanning = false }
+            // A proposal stopped for a newer one leaves the flag to that one.
+            defer { if !Task.isCancelled { self.isReplanning = false } }
             try await self.summarize(settings, detail: proposal.detail, planOnly: true)
         }
     }
@@ -284,6 +297,11 @@ import UniformTypeIdentifiers
     func reset() {
         task?.cancel()
         task = nil
+        generation += 1
+        isReplanning = false
+        partProgress = nil
+        slideDescriptionProgress = nil
+        isSendingSlidesAsText = false
         phase = .idle
         savedID = nil
         title = ""
@@ -470,21 +488,22 @@ import UniformTypeIdentifiers
         var hasAudio: Bool
     }
 
-    /// Extracts slides and transcript from one file. A part with no audio contributes only slides,
-    /// unless it is the only part.
+    /// Extracts slides and transcript from one file. A file with no audio contributes only its slides.
     @concurrent
     nonisolated static func process(
         _ url: URL,
         frameOptions: VideoToFrames.Options,
-        isOnlyPart: Bool,
         transcriptionPieces: Int = 1,
         scanPieces: Int? = nil,
         progress: @escaping @Sendable (ProgressKind, Double) -> Void
     ) async throws -> PartResult {
         let duration = try await AVURLAsset(url: url).load(.duration).seconds
         // Long recordings are split into pieces worked on at once, for the slides and the audio alike.
-        var options = frameOptions
-        options.scanPieces = scanPieces ?? transcriptionPieces
+        let options = {
+            var options = frameOptions
+            options.scanPieces = scanPieces ?? transcriptionPieces
+            return options
+        }()
         async let extraction = VideoToFrames.extract(from: url, options: options) { progress(.frames, $0) }
         async let transcription = AudioToTranscription.transcribe(url, pieces: transcriptionPieces) { progress(.transcript, $0) }
 
@@ -493,10 +512,11 @@ import UniformTypeIdentifiers
         var hasAudio = true
         do {
             segments = try await transcription
-        } catch AudioToTranscription.Failure.noAudio where !isOnlyPart {
+        } catch AudioToTranscription.Failure.noAudio {
             hasAudio = false
             progress(.transcript, 1)
         }
+        try Task.checkCancellation()
         return PartResult(
             name: displayName(url), duration: duration.isFinite ? duration : 0, frames: output.frames,
             analyses: output.analyses, distinctFrameCount: output.distinctCount, transcript: segments, hasAudio: hasAudio
@@ -511,10 +531,10 @@ import UniformTypeIdentifiers
         var parts: [LecturePart]
     }
 
-    /// Joins parts into one timeline, each shifted by the total length of the parts before it. Slides are
-    /// thinned only above `maxFrames`; by default nothing is, since each recording was already capped for
-    /// its own length (`VideoToFrames.storedFrameCap`).
-    nonisolated static func combine(_ results: [PartResult], maxFrames: Int = .max) -> Combined {
+    /// Joins parts into one timeline, each shifted by the total length of the parts before it. Every
+    /// part's slides are kept: each recording was already capped for its own length
+    /// (`VideoToFrames.storedFrameCap`).
+    nonisolated static func combine(_ results: [PartResult]) -> Combined {
         var combined = Combined(frames: [], distinctFrameCount: 0, transcript: [], parts: [])
         var offset = 0.0
         for result in results {
@@ -527,9 +547,6 @@ import UniformTypeIdentifiers
             combined.distinctFrameCount += result.distinctFrameCount
             offset += result.duration
         }
-        let kept = VideoToFrames.thinnedIndices(count: combined.frames.count, to: maxFrames)
-        combined.frames = kept.map { combined.frames[$0] }
-        combined.analyses = kept.map { combined.analyses[$0] }
         return combined
     }
 
@@ -554,17 +571,28 @@ import UniformTypeIdentifiers
     ) async throws {
         failedDetail = nil
         if !planOnly { writingDetail = detail }
+        partProgress = nil
+        slideDescriptionProgress = nil
+        isSendingSlidesAsText = false
         defer {
-            if !planOnly { writingDetail = nil }
-            partProgress = nil
-            slideDescriptionProgress = nil
-            isSendingSlidesAsText = false
+            // A stopped request has been replaced (by another request, or by a cleared session), so the
+            // state now belongs to its replacement.
+            if !Task.isCancelled {
+                if !planOnly { writingDetail = nil }
+                partProgress = nil
+                slideDescriptionProgress = nil
+                isSendingSlidesAsText = false
+            }
         }
         do {
             // The level's own model if Settings sets one (e.g. a fast model for Key points).
             var configuration = try settings.configuration(for: detail)
-            // A rejected key is reported before anything is planned (see `FileToAI.verifyKey`).
-            try await FileToAI.verifyKey(configuration)
+            // One question to the provider about the model: its window, its reply limit, and whether it
+            // sees images. A rejected key is reported here, before anything is planned.
+            let model = try await ModelCatalog.check(configuration)
+            try Task.checkCancellation()
+            configuration.maxOutputTokens = model?.maxOutputTokens
+            configuration.supportsEffort = model?.supportsEffort
             if !planOnly {
                 liveNotes = ""
                 phase = .summarizing
@@ -579,7 +607,7 @@ import UniformTypeIdentifiers
             var slideTexts: [String?]?
             var allAsText = false
             if !sentFrames.isEmpty {
-                if await ModelCatalog.acceptsImages(configuration) == false {
+                if model?.acceptsImages == false {
                     slideTexts = await currentSlidesAsText(describe: settings.stored.describeSlides)
                     allAsText = true
                 } else if sentFrames.count > settings.stored.maxFrames {
@@ -588,8 +616,9 @@ import UniformTypeIdentifiers
             }
 
             // How much one request can carry with this model, and whether the lecture fits.
-            let context = await LongLectures.contextWindow(
-                for: configuration, openAICompatibleSetting: settings.stored.openAIContextTokens,
+            let context = LongLectures.contextWindow(
+                provider: configuration.provider, reported: model?.contextTokens,
+                openAICompatibleSetting: settings.contextSetting(for: detail),
                 ollamaSetting: settings.stored.ollamaContextTokens
             )
             configuration.contextTokens = context
@@ -647,6 +676,8 @@ import UniformTypeIdentifiers
                 return plan
             }
             var plan = makePlan()
+            // Reading the slides can take a while; a request stopped meanwhile goes no further.
+            try Task.checkCancellation()
             // Ask before several requests to a paid or rate-limited service. Apple Intelligence is free
             // and on the device, so it just goes ahead.
             if planOnly {
@@ -686,9 +717,14 @@ import UniformTypeIdentifiers
                     // Start again from the lecture-wide choice; makePlan spreads the images over the new sections.
                     slideTexts = await mixedSlides(imageLimit: imageLimit)
                 }
+                try Task.checkCancellation()
                 plan = makePlan()
                 liveNotes = ""
             }
+            // A stream that is stopped ends quietly, without an error, so check: notes cut short by a
+            // stop must never be saved as finished.
+            try Task.checkCancellation()
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw FileToAI.Failure.empty }
             // A lecture without materials never gets a "From the materials" section (small models add one anyway).
             if !documents.contains(where: { !$0.text.isEmpty }) {
                 text = FileToAI.removingEmptyMaterialsSection(from: text)
@@ -702,7 +738,7 @@ import UniformTypeIdentifiers
                 history.attempt { try history.saveNotes(version, for: savedID) }
             }
         } catch {
-            failedDetail = detail
+            if !Task.isCancelled { failedDetail = detail }
             throw error
         }
     }
@@ -831,10 +867,13 @@ import UniformTypeIdentifiers
                 isSection: true
             )
             var notes = ""
+            // The finished parts are joined once per part, not again for every chunk that arrives.
+            let finished = partNotes.isEmpty ? "" : LongLectures.joined(partNotes: partNotes, takeaways: nil) + "\n\n---\n\n"
             for try await chunk in FileToAI.stream(prompt, system: system, with: configuration) {
                 notes += chunk
-                liveNotes = LongLectures.joined(partNotes: partNotes + [notes], takeaways: nil)
+                liveNotes = finished + notes
             }
+            try Task.checkCancellation()
             partNotes.append(notes)
         }
 
@@ -858,6 +897,7 @@ import UniformTypeIdentifiers
             for try await chunk in FileToAI.stream([.text(request)], system: FileToAI.systemPrompt(detail: level), with: configuration) {
                 result += chunk
             }
+            try Task.checkCancellation()
             return result
         }
 

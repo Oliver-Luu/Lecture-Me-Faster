@@ -17,6 +17,7 @@ import SwiftUI
                 .environment(history)
                 .environment(session)
                 .environment(settings)
+                .tint(.brand)
         }
         .defaultSize(width: 1100, height: 720)
     }

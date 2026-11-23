@@ -423,7 +423,7 @@ struct AddProviderSheet: View {
                 Section {
                     ForEach(OpenAIService.addable) { service in
                         HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: Metrics.tight) {
                                 Text(service.name)
                                 Text(service.blurb)
                                     .font(.callout)
@@ -446,6 +446,7 @@ struct AddProviderSheet: View {
                 }
             }
             .formStyle(.grouped)
+            .canvasBackground()
             .navigationTitle("Add a Provider")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -530,7 +531,7 @@ private struct ModelDetailsView: View {
     let lines: [String]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Metrics.tight) {
             ForEach(lines, id: \.self) { Text($0) }
         }
         .font(.callout)
@@ -544,17 +545,25 @@ struct NoteDetailPicker: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        Slider(value: step, in: 0...Double(NoteDetail.allCases.count - 1), step: 1) {
-            Text("Note detail")
-        } minimumValueLabel: {
-            Text("Brief")
-        } maximumValueLabel: {
-            Text("Thorough")
+        // The end labels are plain text beside the slider: as the slider's own labels they took the
+        // tint colour, which is hard to read on the dark background.
+        LabeledContent("Note detail") {
+            HStack(spacing: Metrics.small) {
+                Text("Shorter").foregroundStyle(.secondary)
+                Slider(value: step, in: 0...Double(NoteDetail.allCases.count - 1), step: 1) { Text("Note detail") }
+                    .labelsHidden()
+                    .accessibilityValue(settings.stored.noteDetail.label)
+                Text("Fuller").foregroundStyle(.secondary)
+            }
         }
-        LabeledContent(settings.stored.noteDetail.label) {
+        VStack(alignment: .leading, spacing: Metrics.tight) {
+            Text(settings.stored.noteDetail.label)
+                .font(.headline)
             Text(settings.stored.noteDetail.summary)
-                .multilineTextAlignment(.trailing)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The slider works in Doubles; the setting is a NoteDetail.

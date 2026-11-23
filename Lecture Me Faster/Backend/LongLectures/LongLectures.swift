@@ -19,7 +19,7 @@ nonisolated enum LongLectures {
     static let overheadTokens = 3_000
 
     /// Claude's window when the Models API can't be reached. A rejected key never gets here
-    /// (`FileToAI.verifyKey` stops first).
+    /// (`ModelCatalog.check` stops first).
     static let claudeFallbackContextTokens = 200_000
 
     /// Window size assumed when it can't be found out.
@@ -38,7 +38,7 @@ nonisolated enum LongLectures {
         // Never more than a quarter of the window: with a 32K window (the fallback when it couldn't be
         // looked up) a 64K reserve left 4,000 tokens per request, and a lecture that fits Claude in one
         // request was planned as 931 parts.
-        provider == .claude ? min(64_000, contextTokens / 4) : min(16_384, contextTokens / 4)
+        provider == .claude ? min(FileToAI.claudeMaxTokens, contextTokens / 4) : min(16_384, contextTokens / 4)
     }
 
     /// How many input tokens one request can carry.
@@ -48,43 +48,28 @@ nonisolated enum LongLectures {
 
     // MARK: Finding the context window
 
-    /// The model's context window in tokens. Claude: the Models API's `max_input_tokens`. Ollama: the
-    /// model's `<architecture>.context_length` from /api/show, capped at `maxLocalContextTokens`.
-    /// OpenAI-compatible servers have no standard way to say, so the user's setting is used; so is
-    /// `ollamaSetting` when it isn't 0. Falls back to `fallbackContextTokens` if the server can't be asked.
-    static func contextWindow(for config: AIConfiguration, openAICompatibleSetting: Int, ollamaSetting: Int = 0) async -> Int {
-        switch config.provider {
+    /// The context window to plan for, from what the provider reported about the model (`ModelCatalog.check`;
+    /// nil when it couldn't be asked or didn't say) and the user's settings.
+    /// - Claude: the reported `max_input_tokens`, else `claudeFallbackContextTokens`.
+    /// - Ollama: `ollamaSetting` when it isn't 0; else the reported length capped at
+    ///   `maxLocalContextTokens`; else `fallbackContextTokens`.
+    /// - OpenAI-compatible: the window the server's model list gives (OpenRouter, Gemini), else the user's
+    ///   setting, since most such servers have no way to say.
+    static func contextWindow(
+        provider: AIProvider, reported: Int?, openAICompatibleSetting: Int, ollamaSetting: Int = 0
+    ) -> Int {
+        let reported = reported.flatMap { $0 > 0 ? $0 : nil }
+        switch provider {
         case .apple:
             return AppleIntelligence.contextSize
         case .openAICompatible:
-            return openAICompatibleSetting
+            return reported ?? openAICompatibleSetting
         case .claude:
-            var request = URLRequest(url: config.baseURL.appending(path: "v1/models/\(config.model)"))
-            request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
-            request.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
-            request.timeoutInterval = 20
-            guard let (data, _) = try? await URLSession.shared.data(for: request),
-                  let tokens = claudeContextWindow(from: data)
-            else { return claudeFallbackContextTokens }
-            return tokens
+            return reported ?? claudeFallbackContextTokens
         case .ollama:
             if ollamaSetting > 0 { return ollamaSetting }
-            var request = URLRequest(url: config.baseURL.appending(path: "api/show"))
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "content-type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": config.model])
-            request.timeoutInterval = 20
-            guard let (data, _) = try? await URLSession.shared.data(for: request),
-                  let tokens = ollamaContextLength(from: data)
-            else { return fallbackContextTokens }
-            return min(tokens, maxLocalContextTokens)
+            return reported.map { min($0, maxLocalContextTokens) } ?? fallbackContextTokens
         }
-    }
-
-    /// `max_input_tokens` from a Claude Models API response.
-    static func claudeContextWindow(from data: Data) -> Int? {
-        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return json?["max_input_tokens"] as? Int
     }
 
     /// The context length from an Ollama /api/show response. The key is prefixed with the model's
@@ -300,9 +285,6 @@ nonisolated enum LongLectures {
         return pieces
     }
 
-    // MARK: Prompts
-
-    /// Added before a section's content.
     // MARK: Length at brief levels
 
     /// About how many words the whole lecture's notes should come to at a brief level; nil for Detailed and
@@ -324,6 +306,9 @@ nonisolated enum LongLectures {
         max(60, total * parts / max(allParts, 1))
     }
 
+    // MARK: Prompts
+
+    /// Added before a section's content.
     static func sectionInstructions(
         index: Int, count: Int, section: Plan.Section, transcript: [TranscriptSegment], frameTimes: [Double],
         wordLimit: Int? = nil

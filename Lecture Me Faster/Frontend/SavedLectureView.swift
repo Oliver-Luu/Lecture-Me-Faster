@@ -17,9 +17,10 @@ struct SavedLectureView: View {
                         history.attempt { try history.rename(id, to: name) }
                     }
             } else if history.lecture(id) == nil {
-                ContentUnavailableView("Lecture Not Found", systemImage: "questionmark.folder")
+                EmptyState("Lecture not found", "It may have been deleted for good.")
             } else {
-                ProgressView()
+                // Opening takes a few milliseconds, so a spinner here would only flash.
+                Color.canvas
             }
         }
         // Follow a rename made in the sidebar.

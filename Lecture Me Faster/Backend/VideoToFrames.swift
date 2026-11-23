@@ -308,6 +308,9 @@ nonisolated enum VideoToFrames {
         _ asset: AVURLAsset, duration: Double, interval: Double, pieces: Int,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> Timeline {
+        // A file that doesn't say how long it is (duration not a number) has nothing to sample; without
+        // this check the list of sample times would never end.
+        guard duration.isFinite, duration > 0, interval > 0 else { return Timeline() }
         let times = Array(stride(from: 0, to: duration, by: interval))
         let perBlock = max(1, Int(scanBlockSeconds / interval))
         let blocks = stride(from: 0, to: times.count, by: perBlock).map { Array(times[$0..<min($0 + perBlock, times.count)]) }
@@ -622,9 +625,6 @@ nonisolated enum VideoToFrames {
         return anyChange
     }
 
-    /// Merges neighbouring frames of the same slide that motion split apart: the same words, and
-    /// differences only in busy blocks (a webcam edge). A diagram that changes under the same text
-    /// changes quiet blocks, so it is kept. The merged frame is the later one, at the earlier time.
     // MARK: Builds, by picture
 
     /// Brightness away from the background that counts as drawn content ("ink") on the earlier frame.
@@ -705,24 +705,17 @@ nonisolated enum VideoToFrames {
         return drawn ? pixels : nil
     }
 
-    /// Whether `later` keeps all of `earlier`'s drawing, so `earlier` is an earlier step of it:
-    /// - Each ink pixel of `earlier` must still be ink (not background) at the same place on `later`; up to
-    ///   `allowedMissingInk` may not be, which is noise. Compared exactly: with one pixel of slack, a 5
+    /// Whether the later frames keep all of `earlier`'s drawing, so `earlier` is an earlier step of them.
+    /// Each ink pixel may be found in any of `laters`:
+    /// - Each ink pixel of `earlier` must still be ink (not background) at the same place on a later frame;
+    ///   up to `allowedMissingInk` may not be, which is noise. Compared exactly: with one pixel of slack, a 5
     ///   changed to a 6 left nothing missing.
     /// - Or the missing ink fits in a pointer-sized patch (`pointerPatch`) and every word read on
-    ///   `earlier` is still on `later`: a mouse pointer or text cursor that moved over the same text. (A
-    ///   changed digit is also a small patch, but changes a word, so it is kept.)
+    ///   `earlier` is still in `nextText` (the words on the first later frame): a mouse pointer or text
+    ///   cursor that moved over the same text. (A changed digit is also a small patch, but changes a word,
+    ///   so it is kept.)
     /// Areas in constant motion (a webcam inset; `motion` is per 16×9 block) are left out, and live
     /// camera footage never counts.
-    static func isAddition(
-        _ earlier: [UInt8], to later: [UInt8], width: Int = Signature.width, height: Int = Signature.height,
-        ignoring motion: Motion, earlierText: String? = nil, laterText: String? = nil
-    ) -> Bool {
-        isCovered(earlier, by: [later], width: width, height: height, ignoring: motion, earlierText: earlierText, nextText: laterText)
-    }
-
-    /// The same test against several later frames: each ink pixel may be found in any of them.
-    /// `nextText` is the words on the first of them, for the pointer-sized patch rule.
     static func isCovered(
         _ earlier: [UInt8], by laters: [[UInt8]], width: Int = Signature.width, height: Int = Signature.height,
         ignoring motion: Motion, earlierText: String? = nil, nextText: String? = nil
@@ -742,18 +735,11 @@ nonisolated enum VideoToFrames {
     /// The largest patch (in pixels at `additionWidth`) of missing ink taken for a moved pointer or cursor.
     static let pointerPatch = 40
 
-    /// How much ink `earlier` has, and how much of it `later` lacks; nil when the backgrounds differ.
-    static func missingInk(
-        _ earlier: [UInt8], in later: [UInt8], width: Int, height: Int, ignoring motion: Motion, stopAfter: Int = .max,
-        reach: Int = 0
-    ) -> (ink: Int, missing: Int, box: (width: Int, height: Int))? {
-        missingInk(earlier, in: [later], width: width, height: height, ignoring: motion, stopAfter: stopAfter, reach: reach)
-    }
-
-    /// Ink of `earlier` found in none of `laters` (only those on the same background count; nil if none is).
+    /// How much ink `earlier` has, and how much of it is found in none of `laters` (only those on the same
+    /// background count; nil if none is).
     static func missingInk(
         _ earlier: [UInt8], in allLaters: [[UInt8]], width: Int, height: Int, ignoring motion: Motion,
-        stopAfter: Int = .max, reach: Int = 0
+        stopAfter: Int = .max
     ) -> (ink: Int, missing: Int, box: (width: Int, height: Int))? {
         let background = dominantBrightness(earlier)
         let laters = allLaters.filter { abs(background - dominantBrightness($0)) <= 16 }
@@ -781,17 +767,13 @@ nonisolated enum VideoToFrames {
                         ink += 1
                         var found = false
                         for frame in 0..<laters.count where !found {
-                        for dy in max(0, y - reach)...min(height - 1, y + reach) where !found {
-                            for dx in max(0, x - reach)...min(width - 1, x + reach) {
-                                // Still ink: not background, and about as dark (or light) as before. Camera noise
-                                // and lighting shift ink a little; erased strokes turn to background, and a person
-                                // standing in front is far from the ink's brightness.
-                                let later = Int(b[frame * frameSize + dy * width + dx])
-                                let fromBackground = later - background, fromInk = later - value
-                                if (fromBackground > stillInkThreshold || fromBackground < -stillInkThreshold)
-                                    && fromInk <= sameInkTolerance && fromInk >= -sameInkTolerance { found = true; break }
-                            }
-                        }
+                            // Still ink: not background, and about as dark (or light) as before. Camera noise
+                            // and lighting shift ink a little; erased strokes turn to background, and a person
+                            // standing in front is far from the ink's brightness.
+                            let later = Int(b[frame * frameSize + y * width + x])
+                            let fromBackground = later - background, fromInk = later - value
+                            found = (fromBackground > stillInkThreshold || fromBackground < -stillInkThreshold)
+                                && fromInk <= sameInkTolerance && fromInk >= -sameInkTolerance
                         }
                         if !found {
                             missing += 1
@@ -813,6 +795,9 @@ nonisolated enum VideoToFrames {
         return (counts.indices.max { counts[$0] < counts[$1] } ?? 0) * 8 + 4
     }
 
+    /// Merges neighbouring frames of the same slide that motion split apart: the same words, and
+    /// differences only in busy blocks (a webcam edge). A diagram that changes under the same text
+    /// changes quiet blocks, so it is kept. The merged frame is the later one, at the earlier time.
     static func mergingDuplicates(
         _ frames: [LectureFrame], _ analyses: [FrameAnalysis], pixels: [[UInt8]?], motion: Motion
     ) -> ([LectureFrame], [FrameAnalysis]) {
@@ -915,12 +900,6 @@ nonisolated enum VideoToFrames {
         return zip(texts, scores).map { FrameAnalysis(text: $0, visualScore: $1) }
     }
 
-    /// Reads the text on each frame, in frame order.
-    @concurrent
-    static func readText(in frames: [LectureFrame]) async -> [String] {
-        await analyze(frames).map(\.text)
-    }
-
     /// A tiny grayscale picture for measuring picture content.
     enum Thumbnail {
         static let width = 64, height = 36
@@ -1006,9 +985,5 @@ nonisolated enum VideoToFrames {
         guard count > limit, limit > 0 else { return Array(0..<count) }
         let step = Double(count) / Double(limit)
         return (0..<limit).map { Int(Double($0) * step) }
-    }
-
-    static func thinned(_ frames: [LectureFrame], to limit: Int) -> [LectureFrame] {
-        thinnedIndices(count: frames.count, to: limit).map { frames[$0] }
     }
 }

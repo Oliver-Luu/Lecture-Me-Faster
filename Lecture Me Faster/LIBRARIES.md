@@ -31,7 +31,7 @@ network service the app talks to over plain HTTP.
 | Ollama | `POST /api/chat`, `GET /api/tags`, `POST /api/show` (a model's context length) | Local models, free. Default server `http://localhost:11434` |
 | Claude (Anthropic API) | `POST https://api.anthropic.com/v1/messages`, `GET /v1/models` (model list, paginated) and `GET /v1/models/{model}` (`max_input_tokens`) | Paid, needs an API key. Streaming Messages API |
 | OpenAI | `https://api.openai.com/v1`: `POST /chat/completions`, `GET /models` | Paid, needs a key |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai`: Google's OpenAI-compatible endpoints | Needs a key |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai`: Google's OpenAI-compatible endpoints; plus Google's own `GET /v1beta/models?key=…` for each model's context window (`inputTokenLimit`), which the OpenAI-format list leaves out | Needs a key |
 | DeepSeek | `https://api.deepseek.com`: `POST /chat/completions`, `GET /models` | Paid, needs a key |
 | OpenRouter | `https://openrouter.ai/api/v1` | Many providers' models through one key |
 | LM Studio | `http://localhost:1234/v1` | Local, free |

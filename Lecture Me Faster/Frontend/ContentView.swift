@@ -18,6 +18,8 @@ struct ContentView: View {
     /// Lectures waiting for "Move N lectures to Recently Deleted?" to be confirmed.
     @State private var lecturesAwaitingDeletion: [UUID]?
     @State private var isImporting = false
+    /// True while files are dragged over the detail pane, so the drop area can light up.
+    @State private var isDropTargeted = false
     @State private var isShowingSettings = false
     @State private var newLecture: NewLectureFiles?
     @State private var unsupportedFiles: [String] = []
@@ -25,25 +27,28 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            HistorySidebar(selection: $selection, onDelete: requestDeletion, onRename: rename)
+            HistorySidebar(selection: $selection, onDelete: requestDeletion, onRename: rename) { isShowingSettings = true }
         } detail: {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.canvas)
                 // On the detail pane only, so dropping onto the sidebar does nothing.
                 .dropDestination(for: URL.self) { urls, _ in
                     guard !urls.isEmpty else { return false }
                     open(urls)
                     return true
+                } isTargeted: {
+                    isDropTargeted = $0
                 }
                 .toolbar {
+                    // Settings is at the foot of the sidebar.
                     ToolbarItem {
-                        Button("New Lecture", systemImage: "plus", action: startNewLecture)
-                    }
-                    ToolbarItem {
-                        Button("Settings", systemImage: "gearshape") { isShowingSettings = true }
+                        Button("New Lecture", systemImage: "square.and.pencil", action: startNewLecture)
+                            .help("Start a new lecture")
                     }
                 }
         }
+        .windowCanvas()
         .fileImporter(
             isPresented: $isImporting, allowedContentTypes: [.movie, .audio] + DocumentToText.contentTypes,
             allowsMultipleSelection: true
@@ -63,7 +68,7 @@ struct ContentView: View {
         .alert("Some Files Can't Be Used", isPresented: unsupportedIsShown) {
             Button("OK") {}
         } message: {
-            Text("\(unsupportedFiles.joined(separator: ", ")). The app reads video, audio, PDF, Word (.docx), PowerPoint (.pptx), text, and image files. Export other documents (.doc, .ppt, Pages, Keynote) as PDF.")
+            Text("\(unsupportedFiles.joined(separator: ", ")). The app reads video, audio, PDF, Word (.docx), PowerPoint (.pptx), text and image files. Export anything else (.doc, .ppt, Pages, Keynote) as a PDF first.")
         }
         .confirmationDialog(
             "Stop “\(session.title)”?", isPresented: replaceIsConfirming, presenting: filesAwaitingConfirmation
@@ -71,8 +76,8 @@ struct ContentView: View {
             Button("Stop and Start New Lecture", role: .destructive) { proceed(with: urls) }
         } message: { _ in
             Text(session.savedID == nil
-                 ? "It is still being processed and will be lost."
-                 : "Its slides and transcript are saved, but its notes are unfinished. You can write them later from its Notes tab.")
+                 ? "It hasn't been saved yet, so the work done so far will be lost."
+                 : "Its slides and transcript are saved. The notes stop where they are, and you can write them again from its Notes tab.")
         }
         .alert("Couldn't Update History", isPresented: errorIsShown) {
             Button("OK") {}
@@ -113,11 +118,10 @@ struct ContentView: View {
     /// Shown when several lectures are selected in the sidebar.
     private var multipleSelection: some View {
         let ids = HistorySidebar.lectureIDs(in: selection, order: history.lectures)
-        return ContentUnavailableView {
-            Label("\(ids.count) Lectures Selected", systemImage: "rectangle.stack")
-        } description: {
-            Text("Delete moves them to Recently Deleted, where they can be restored for \(LectureHistory.retentionDays) days.")
-        } actions: {
+        return EmptyState(
+            title: "\(ids.count) lectures selected",
+            message: "Deleting moves them to Recently Deleted, where they stay for \(LectureHistory.retentionDays) days."
+        ) {
             Button("Delete \(ids.count) Lectures", systemImage: "trash", role: .destructive) { requestDeletion(ids) }
                 .disabled(ids.isEmpty)
         }
@@ -160,50 +164,11 @@ struct ContentView: View {
     }
 
     private var importPrompt: some View {
-        ContentUnavailableView {
-            Label("Drop a lecture here", systemImage: "waveform.badge.plus")
-        } description: {
-            Text("A video or audio recording (or several parts of one), plus any slides, handouts, or readings as PDF, Word, PowerPoint, text, or images. \(settings.stored.provider == .apple ? "Everything, including writing the notes with Apple Intelligence, happens on this device." : "Everything is read on this device, then sent to \(settings.providerName) for notes.")")
-            if session.phase == .summarizing {
-                Label("Writing notes for “\(session.title)”…", systemImage: "text.badge.plus")
-                    .padding(.top, 8)
-            }
-        } actions: {
-            Button("Choose Files…") { isImporting = true }
-                .buttonStyle(.borderedProminent)
-        }
+        ImportView(isTargeted: isDropTargeted) { isImporting = true }
     }
 
     private var processingView: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            if session.isReadingMaterials {
-                ProgressView(
-                    "Reading materials (\(session.currentMaterial + 1) of \(session.materialCount)): \(session.currentMaterialName)",
-                    value: Double(session.currentMaterial), total: Double(max(session.materialCount, 1))
-                )
-                .lineLimit(1)
-                .truncationMode(.middle)
-            } else if session.partCount > 0 {
-                if session.partCount > 1 {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(session.finishedPartCount) of \(session.partCount) parts done")
-                            .font(.headline)
-                        if !session.runningParts.isEmpty {
-                            Text("Working on \(session.currentPartName)")
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                        }
-                    }
-                }
-                ProgressView("Finding slides in the video", value: min(session.frameProgress, 1))
-                ProgressView("Transcribing audio on device", value: min(session.transcriptProgress, 1))
-            }
-            Button("Cancel", role: .cancel) { session.reset() }
-                .frame(maxWidth: .infinity)
-        }
-        .frame(maxWidth: 420)
-        .padding(32)
+        ProcessingView()
     }
 
     private var errorIsShown: Binding<Bool> {

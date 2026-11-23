@@ -118,12 +118,53 @@ struct FileToAITests {
         #expect(messages.map { $0["role"] as? String } == ["system", "user"])
         #expect(messages[1]["images"] as? [String] == ["AQID", "BAUG"])
         let options = try #require(json["options"] as? [String: Int])
-        #expect(options["num_ctx"] == 8192)
+        // The smallest window used is 8,192; this short lecture needs more only because room is kept for the notes.
+        let system = FileToAI.systemPrompt(detail: .detailed)
+        let reserve = LongLectures.outputReserve(provider: .ollama, contextTokens: LongLectures.maxLocalContextTokens)
+        #expect(reserve == 16_384)
+        let prompt = parts.compactMap { if case .text(let text) = $0 { text } else { nil } }.joined(separator: "\n")
+        #expect(options["num_ctx"] == (prompt.count + system.count) / 3 + 2 * 1000 + 1000 + reserve)
 
+        // The window covers the lecture, the instructions, and the room the plan keeps for the notes
+        // (before 2026-11-16 only 6,000 tokens were added, so a long reply could be cut off).
         let longText = String(repeating: "word ", count: 20_000)
         let longJSON = try body(FileToAI.request(for: [.text(longText)], config: config(.ollama)))
         let longOptions = try #require(longJSON["options"] as? [String: Int])
-        #expect(longOptions["num_ctx"] == 100_000 / 3 + 6000)
+        #expect(longOptions["num_ctx"] == (100_000 + system.count) / 3 + 1000 + reserve)
+
+        // Never more than the model's window, and the reserve shrinks with a small window.
+        var small = config(.ollama)
+        small.contextTokens = 16_384
+        let smallOptions = try #require(try body(FileToAI.request(for: [.text(longText)], config: small))["options"] as? [String: Int])
+        #expect(smallOptions["num_ctx"] == 16_384)
+    }
+
+    @Test func claudeRequestFitsWhatTheModelAccepts() throws {
+        // A current model: effort is set and the reply limit is the app's own.
+        let current = try body(FileToAI.request(for: [.text("hi")], config: config(.claude, model: "claude-opus-5-5")))
+        #expect((current["output_config"] as? [String: String]) == ["effort": "medium"])
+        #expect(current["max_tokens"] as? Int == 64_000)
+
+        // Haiku 4.5 rejects the effort setting (Anthropic's reference, 2026-11-03), so it isn't sent,
+        // whether known from the model's name or from what the model list said.
+        let old = try FileToAI.request(for: [.text("hi")], config: config(.claude, model: "claude-haiku-4-5"))
+        #expect(try body(old)["output_config"] == nil)
+        #expect(old.value(forHTTPHeaderField: "anthropic-beta") == nil)
+        var listed = config(.claude, model: "claude-some-future-model")
+        listed.supportsEffort = false
+        listed.maxOutputTokens = 32_000
+        let future = try body(FileToAI.request(for: [.text("hi")], config: listed))
+        #expect(future["output_config"] == nil)
+        #expect(future["max_tokens"] as? Int == 32_000, "Never more than the model can write")
+        #expect(future["fallbacks"] == nil, "Only the models Anthropic lists get the refusal fallback")
+
+        var big = config(.claude, model: "claude-opus-5-5")
+        big.maxOutputTokens = 128_000
+        #expect(try body(FileToAI.request(for: [.text("hi")], config: big))["max_tokens"] as? Int == 64_000)
+        #expect(FileToAI.claudeHasRefusalFallback("claude-fable-5-2"))
+        #expect(FileToAI.claudeHasRefusalFallback("claude-sonnet-5-5"))
+        #expect(!FileToAI.claudeHasRefusalFallback("claude-sonnet-5"))
+        #expect(!FileToAI.claudeHasRefusalFallback("claude-opus-4-8"))
     }
 
     @Test func openAIRequestUsesBearerKeyOnlyWhenPresent() throws {

@@ -34,7 +34,8 @@ the total length of the parts before it, and each recording keeps its own slides
 recording and grows with its length). The model is
 told where each part starts, and the part list is saved with the lecture (`SavedLecture.parts`) so
 notes written later use it too. A part with no audio still contributes its slides; the lecture fails only
-if no part has audio. Dropped files that are not video or audio are ignored.
+if it has nothing at all to write notes from: no speech, no slide, and no material text. A screen
+recording with no sound gets notes from its slides (before 2026-11-16 it failed with "no audio track"). Dropped files that are not video or audio are ignored.
 
 Every lecture is saved to the **history** on the device as soon as its slides and transcript are
 ready, before the model is called, so a failed or cancelled model call never loses the on-device work.
@@ -123,26 +124,29 @@ with the selection. Where the facts come from:
 | Claude | A line per family (Opus/Sonnet/Haiku/Fable) | `max_input_tokens` | `max_tokens`, capped at the app's 64,000 | `capabilities.image_input.supported` |
 | Ollama | Size and quantization from `/api/show` `details` | `/api/show`, or the Ollama **Context window** setting (above 262,144 the panel explains the cap) | Not reported | `"vision"` in `/api/show` `capabilities` |
 | OpenRouter | `description` | `context_length` | `top_provider.max_completion_tokens` | `"image"` in `architecture.input_modalities` |
+| Google Gemini | Not reported | `inputTokenLimit` from Google's own list (`GET /v1beta/models`), since its OpenAI-format list has none | `outputTokenLimit` | Not reported |
 | Other OpenAI-compatible | Not reported | The Context window setting | Not reported | Not reported |
 
 Ollama's facts (and a Claude model missing from the list) are fetched for the selected model only
 (`ModelCatalog.details`).
 
 When an OpenAI-compatible server's list gives a model's context window (OpenRouter's
-`context_length`), choosing that model, by the menu or by typing, sets the **Context window** setting
+`context_length`, or Gemini's `inputTokenLimit`, added from Google's own list by
+`ModelCatalog.addingGeminiLimits`), choosing that model, by the menu or by typing, sets the **Context window** setting
 to it (`AIModelFields.listedContextWindow`), so long lectures are split to the right size. The setting's
 menu shows that exact value even when it isn't one of the presets.
 
 ### Lectures too long for one request
 
-Before writing notes, `LectureSession` asks how big the model's context window is
-(`LongLectures.contextWindow`):
+Before writing notes, `LectureSession` asks the provider about the model once (`ModelCatalog.check`:
+its context window, its reply limit, whether it sees images, and whether the key is accepted) and
+works out the window to plan for (`LongLectures.contextWindow`):
 
 | Provider | Where the window comes from |
 |---|---|
 | Claude | `GET /v1/models/{model}` → `max_input_tokens` (1,000,000 for the current models) |
 | Ollama | The Ollama **Context window** setting under Advanced when it isn't Automatic; otherwise `POST /api/show` → `model_info["<general.architecture>.context_length"]`, capped at 262,144 (raised from 131,072 on 2026-11-12 for Nemotron 3's 256K). Ollama's MLX builds report no length, so Automatic falls back to 32,768. `num_ctx` is sized to each lecture, so a big window only costs memory when a lecture fills it |
-| OpenAI-compatible | The **Context window** setting (there is no standard way to ask) |
+| OpenAI-compatible | The window the server's model list gives for the model (OpenRouter, Gemini); otherwise the **Context window** setting, since there is no standard way to ask. The setting is kept per service (`Stored.serviceContextTokens`), and a level with its own model uses its own service's setting (`AppSettings.contextSetting(for:)`) |
 
 If the server can't be asked, 32,768 is assumed. Room is kept for the notes themselves (64,000 tokens
 for Claude, which is its `max_tokens`; a quarter of the window, at most 16,384, for the others), and
@@ -209,8 +213,11 @@ Lecture Me Faster/
 │       ├── SavedLecture.swift     The saved record of one lecture
 │       └── LectureHistory.swift   Saves lectures to disk; history and Recently Deleted
 └── Frontend/
-    ├── ContentView.swift          Sidebar layout, import/drop screen, and progress
-    ├── HistorySidebar.swift       New Lecture, the history list, and Recently Deleted
+    ├── ContentView.swift          The window: sidebar, detail pane, drops, sheets, and alerts
+    ├── Metrics.swift              Shared spacing and widths, `Notice` panels, and `EmptyState` screens
+    ├── ImportView.swift           The first screen: drop area, Add Files, detail and model, where the lecture is sent; `LogoMark`
+    ├── ProcessingView.swift       The steps shown while a lecture's files are read
+    ├── HistorySidebar.swift       New Lecture, the history grouped by date, and Recently Deleted
     ├── SavedLectureView.swift     Shows a lecture reopened from the history
     ├── RecentlyDeletedView.swift  Restore, delete now, delete all
     ├── LectureResultView.swift    Notes, Transcript, and Slides tabs
@@ -222,6 +229,7 @@ Lecture Me Faster/
     ├── RenamableTitle.swift       Toolbar title you click to rename the lecture
     └── AppSettings.swift          Saved settings; API keys go in the Keychain
 Lecture Me FasterTests/            Unit tests (Swift Testing)
+Tools/make_icon.swift              Draws the app icon and writes every size into the asset catalogue
 Secrets.example.env                Template for your git-ignored development keys
 ```
 
@@ -319,7 +327,7 @@ Secrets.example.env                Template for your git-ignored development key
       ±0.1 points of run-to-run variation; one after another is repeatable. A real 73-minute lecture: the
       same 11,356 words as 1 piece, 58 s → 19 s. Settings > Advanced > Speed > "Transcribe long
       recordings in pieces" (`transcribeInPieces`, on by default) turns it off for the same transcript
-      every time. `PieceTuning` switches pause alignment and running at once, for measuring.
+      every time.
     - Slides, pass 1 (`scanTimeline`): one-minute blocks are decoded up to 4 at a time, each with its own
       `AVAssetImageGenerator`, and added to the timeline strictly in time order. So the result is
       identical to decoding one sample after another: the same 653 slides and text on the 89-minute
@@ -353,8 +361,8 @@ Secrets.example.env                Template for your git-ignored development key
   - Spoken-code prompt ("b sub k is b[k]", copy code from slides): about 11 facts and 704 words in one
     run, but a worse 1,382-word set in the next. At temperature 0.3 it copied garbled handwriting
     recognition word for word.
-  Both changes are off (`AppleIntelligence.usesGreedySampling`, `FileToAI.includesSpokenCodeGuidance`, kept
-  as switches): run-to-run variation was bigger than either effect. Apple Intelligence also ignored the
+  Neither change is in the app (the off switches kept for measuring were removed on 2026-11-16):
+  run-to-run variation was bigger than either effect. Apple Intelligence also ignored the
   500-word target (521–1,382 words). One deterministic fix was kept: `removingEmptyMaterialsSection`
   strips a "From the materials" section from notes of a lecture without materials, which 4 of 6 runs
   wrote despite the prompt.
@@ -391,7 +399,7 @@ Secrets.example.env                Template for your git-ignored development key
   models of every provider in `usableConnections`, loaded with `ModelCatalog`. A saved choice stays listed
   even when its provider's list can't load. `LevelModelTests` covers it; one test checks against
   `MockModelServer` that Key points requests carry the level's model and Detailed the default.
-- **Changing the model from a lecture (2026-11-13):** the lecture toolbar shows `AppSettings.chosenModelName`
+- **Changing the model from a lecture (2026-11-13, moved 2026-11-16):** the top left of the lecture shows `AppSettings.chosenModelName`
   and opens `ModelSwitcher` (the New Lecture sheet's `AIModelFields`, plus Write/Rewrite). A split
   proposal on screen is worked out again (`LectureSession.replan`, `summarize(planOnly:)`) when
   `AppSettings.planningKey` changes: provider, model, key, address, context-window or slide settings,
@@ -402,12 +410,114 @@ Secrets.example.env                Template for your git-ignored development key
   lookup fail, so the app fell back to 32,768 tokens. Claude's reply reserve was a flat 64,000, which
   left the 4,000-token minimum per request, and a lecture that fits in one request was planned as 931
   parts and about 1 million tokens. Now:
-  - `FileToAI.verifyKey` checks the key before planning (Claude: `GET /v1/models/{model}`;
-    OpenAI-compatible with a key: `GET /models`). HTTP 401/403 stops with "The API key was rejected …
+  - `ModelCatalog.check` checks the key before planning, in the same request that looks up the model
+    (Claude: `GET /v1/models/{model}`; OpenAI-compatible with a key: `GET /models`). HTTP 401/403 stops with "The API key was rejected …
     may have expired, been revoked, or been mistyped …", keeping the provider's own message. 402 and 429
     get their own advice (`FileToAI.Failure.forStatus`), during the notes request too.
   - The reply reserve is at most a quarter of the window.
   - Claude's fallback window is 200,000 tokens when the Models API can't be reached.
+- **Interface redesign (2026-11-16).** Every screen now takes its spacing from `Metrics` (4, 8, 12, 16,
+  24, 40 points) instead of its own numbers, and its colour from `Color.brand`, a blue (#2774AE) set as
+  the app's tint in `MyApp` (the "Brand" colour in the asset catalogue, the same in light and dark mode).
+  - Messages are `Notice` panels: normal-coloured text on a tinted panel, replacing orange and red text
+    that was hard to read in dark mode. Empty tabs and lists use `EmptyState`.
+  - The first screen is `ImportView`: a drop area that turns blue while files are over it
+    (`dropDestination`'s `isTargeted`), and a line saying where the lecture is sent.
+  - `ProcessingView` lists the steps and their state (`ProcessingView.stages`, a pure function so it
+    can be tested) in place of two bare progress bars.
+  - The Notes tab's level picker is a row of buttons with a dot for written, a ring for unwritten, and a
+    spinner for the level being written, replacing a segmented control with "✓" in its labels. Notes sit
+    in a 720-point reading column with three heading sizes.
+  - The sidebar groups lectures under Today, Previous 7 Days, and Earlier (`HistorySidebar.groups`).
+  - Wording across Settings, the New Lecture sheet, alerts, and Recently Deleted was shortened.
+  - To look at a screen from the terminal (the screen can't be captured there): in a test, put the view
+    in an `NSHostingView` inside an `NSWindow`, call `cacheDisplay(in:to:)`, record the PNG with
+    `Attachment.record`, run with `-resultBundlePath`, and export with
+    `xcrun xcresulttool export attachments`. Lists in a sidebar don't draw correctly this way.
+- **Folders (2026-11-16).** `LectureFolder` is an ID and a name; the list lives in
+  `<root>/folders.json` and each lecture records its folder in `SavedLecture.folderID` (absent in older
+  records, which still load). `LectureHistory` has `createFolder(named:)`, `renameFolder`, `deleteFolder`
+  (its lectures become unfiled, including ones in Recently Deleted), `move(_:toFolder:)`,
+  `lectures(in:)`, and `unfiledLectures` (which also holds lectures whose folder is missing, so none can
+  become unreachable). Names are trimmed and kept apart ("Physics 2"). **New Folder** is a row under New
+  Lecture that looks like it but is a button (it opens the naming prompt and is never selected); the
+  Folders heading only appears once there is a folder. The sidebar shows folders as disclosure groups
+  above the date headings; lectures are filed from the right-click menu, alone or
+  several at once. Not built: dragging a lecture onto a folder, and folders inside folders.
+- **Faster switching between lectures (2026-11-16).** Measured with a 120,000-character set of notes:
+  reading the files took 3 ms, but laying the notes out as one `Text` took about 300 ms, and they were
+  parsed again (70 ms) on every redraw. `MarkdownView` now shows long notes as several `Text`s in a
+  `LazyVStack`, split at headings once a piece passes 6,000 characters (`sections(of:)`), and keeps the
+  parsed result of the last 12 notes (`sections(for:)`). First display fell from about 400 ms to about
+  130 ms, and to about 40 ms for notes seen before. The cost: in long notes a text selection stays
+  inside one piece. Short notes are still one `Text`, and Copy Notes copies everything.
+- **Hover highlight (2026-11-16).** `hoverHighlight(_:)` in `Metrics.swift` lays a faint tint over a
+  control while the pointer is on it: the model name, the level buttons, the icons under the notes, the
+  first screen's buttons, and Settings in the sidebar. Every sidebar row (New Lecture, New Folder,
+  folders, lectures, Recently Deleted) uses `sidebarRowHover()` instead, which draws the tint as the
+  row's `listRowBackground`, so it lines up with the selection highlight at any indent; a tint laid over
+  the row's content started further right than the selection, worst inside a folder. It must sit on the
+  row itself (for New Folder, on the button, not its label), or the list ignores it.
+  `showsHoverForPreview` in the environment shows every highlight at once, for rendering screens in
+  tests where there is no pointer.
+- **Near-black dark mode (2026-11-16).** Three background colours in the asset catalogue replace the
+  system's dark grey: `Color.canvas` (#0D0D0F) behind content, `Color.sidebarSurface` (#141416) behind the
+  sidebar, and `Color.panel` (#1A1A1D) for boxes on the canvas. Their light-mode values are white and two
+  near-whites, so light mode looks as before. Lists and forms take the canvas through
+  `canvasBackground()` (which hides the system's own list background), and the window, including behind
+  the toolbar, through `windowCanvas()`. Use these for any new screen.
+- **Chat-app layout (2026-11-16).** The layout chat apps share, applied to lectures:
+  - The model is a name with a chevron at the top left of the lecture (`LectureResultView.modelButton`),
+    beside the tabs, and opens `ModelSwitcher`. It was a toolbar item, which macOS moved into the overflow
+    menu when the lecture's or model's name was long, so it seemed to come and go.
+  - Copy, Share and Rewrite are a quiet row of icons under the notes, with who wrote them
+    (`actionRow`); Copy shows a tick for a moment. The lecture toolbar now holds only the name and New
+    Lecture.
+  - Settings is a row at the foot of the sidebar (`safeAreaInset`), also on ⌘,.
+  - The first screen is a question over a rounded box like a message field: what to drop in it, then Add
+    Files, the level of detail (a menu), and the model (opens `ModelSwitcher`). Both choices are the saved
+    settings, the same ones the New Lecture sheet shows.
+- **App icon (2026-11-16).** Six chalk-coloured bars on the brand blue (#2774AE), in two groups whose heights
+  fall from left to right, so they read as a sound wave and as a fast-forward sign. `Tools/make_icon.swift`
+  draws it with Core Graphics (no design file) and writes `AppIcon.appiconset`: one full-square 1024-pixel
+  image for iPhone and iPad, and ten Mac sizes drawn as a rounded square with a margin and shadow. To
+  change it, edit the script and run
+  `swift Tools/make_icon.swift "Lecture Me Faster/Assets.xcassets/AppIcon.appiconset"`. The app target
+  sets `ASSETCATALOG_COMPILER_APPICON_NAME` to `AppIcon`. `LogoMark` draws the same bars on the first
+  screen; its numbers must match the script's. There is no Vision Pro icon yet (that needs layered images).
+- **Whole-codebase review (2026-11-16).** Found by reading every file, confirmed with probe tests
+  that failed on the old code, and fixed:
+  - *Stopped work carried on.* Cancel during transcription still saved a lecture (with no name and part
+    of the transcript) and sent it to the model, and "Stop and Start New Lecture" left the stopped
+    lecture's empty notes in the new one. Cause: a cancelled `SpeechAnalyzer` run returns what it has, and
+    a cancelled `for try await` over an `AsyncThrowingStream` ends without an error, so the code after
+    them ran as if they had finished. Now every `await` in `LectureSession.start` and `summarize` that is
+    followed by a change to the session is followed by `Task.checkCancellation()` first, a stopped
+    request no longer clears its replacement's state, and late progress from a stopped lecture is
+    ignored (`generation`).
+  - *An empty reply was saved as finished notes.* It is now `FileToAI.Failure.empty`.
+  - *One Context window setting for every OpenAI-format service* (see the table above).
+  - *Claude requests:* `output_config.effort` is left out for models that reject it (the Models API's
+    `capabilities.effort.supported`, else by name: Haiku 4.5, Sonnet 4.5, Claude 3), `max_tokens` is
+    never above the model's own limit, and the refusal fallback goes only to the models Anthropic's
+    reference lists for it (Fable, Mythos, Opus 5 and 5.5, Sonnet 5.5; reference dated 2026-11-03).
+    Not tried against the real API with an old model.
+  - *Ollama's `num_ctx`* added only 6,000 tokens to the prompt; it now adds the instructions and the
+    same reply reserve the plan uses (up to 16,384), so a long reply isn't cut off.
+  - *One request before writing instead of three* (`ModelCatalog.check` replaced `FileToAI.verifyKey`,
+    `ModelCatalog.acceptsImages` and the request inside `LongLectures.contextWindow`).
+  - *A video that doesn't report its length* no longer hangs `scanTimeline` (the list of sample times
+    never ended when the length wasn't a number; measured with a 3-line program).
+  - *Slides tab:* each slide is shown as a 640-pixel copy made off the main thread and cached
+    (`FrameThumbnails`), instead of decoding the full JPEG in the view's `body` on every redraw.
+  - *Streaming a lecture written in parts* joins the finished parts once per part, not once per chunk.
+  - Measured and left alone: opening a saved lecture reads its slides on the main thread, but 1,000
+    slide-sized files (65 MB) read in 15 ms.
+  - Removed as unused: `AppSettings.defaultModelChoice`, `PieceTuning`, the greedy-sampling and
+    spoken-code switches, `combine(maxFrames:)`, `missingInk`'s `reach`, and four functions only tests
+    called (now in `TestSupport.swift` or replaced). `AppSettings` builds a provider's configuration
+    in one place instead of four. `VideoToFrames.Options.maxFrames` stays: the app never sets it, but it
+    is how the slide cap is tested.
 - **AudioToTranscription** splits the audio track out of videos into a temporary `.m4a`, then
   transcribes it with `SpeechTranscriber`. The speech model for your language is downloaded by the
   system the first time it is needed.
@@ -517,10 +627,14 @@ xcodebuild test -project "Lecture Me Faster.xcodeproj" -scheme "Lecture Me Faste
 | `FileToAITests.swift` | Prompt assembly, the note-detail levels and that each provider receives the chosen one, the request sent to each provider, and parsing of each provider's response stream (text, errors, refusals, truncation) |
 | `MarkdownViewTests.swift` | Markdown block parsing, including half-streamed code blocks |
 | `DevKeysTests.swift` | Parsing of `Secrets.env` |
-| `MultiFileLectureTests.swift` | Lectures made of several files: which files are accepted, sorting, the suggested name, joining parts into one timeline, silent parts, and failing when no part has audio |
-| `TestMedia.swift` | Not tests: generates the silent slide videos used by the media and multi-file tests |
+| `MultiFileLectureTests.swift` | Lectures made of several files: which files are accepted, sorting, the suggested name, joining parts into one timeline, silent parts, a lecture with slides but no sound written from its slides, and failing when there is no sound and no slide |
+| `StoppedLectureTests.swift` | A stopped lecture leaves nothing behind: Cancel while a spoken recording is transcribed saves and sends nothing; a new lecture gets nothing from the one it replaced; a stopped request is not saved as notes; an empty reply is a failure. Uses `StallingModelServer`, which starts a reply and never finishes |
+| `ReviewFixTests.swift` | The one question asked of the provider before writing (rejected key, unreachable server), Gemini's limits from Google's list, a context window per service and per level, Slides tab thumbnails, and a video that doesn't say how long it is |
+| `EmptyMaterialsSectionTests.swift` | Removing an empty "From the materials" section |
+| `TestSupport.swift` | Not tests: shorthands the tests use (`FileToAI.request(…detail:)`, `VideoToFrames.isAddition`) |
+| `TestMedia.swift` | Not tests: generates the silent slide videos used by the media and multi-file tests, and spoken audio (`makeSpeech`, the system voice) |
 | `DocumentToTextTests.swift` | Reading a real `.docx`, a `.pptx` (slide order, stored and compressed zip entries), text PDFs, scanned PDF pages and images with text recognition, the size cap, unsupported types |
-| `LongLecturesTests.swift` | Context windows from Claude and Ollama responses, input budgets, splitting by time and by paragraph, part prompts, and the whole flow against `MockModelServer`: asking first, one request per part plus combining, declining, "don't ask again", and lectures that fit |
+| `LongLecturesTests.swift` | The context window to plan for from what each provider reports and the settings, input budgets, splitting by time and by paragraph, part prompts, and the whole flow against `MockModelServer`: asking first, one request per part plus combining, declining, "don't ask again", and lectures that fit |
 | `OpenAIServiceTests.swift` | The short Provider menu and adding/removing providers, service addresses, keys and models kept per service, asking for a hosted service's key by name, old settings loading as "Other", and test settings never using `Secrets.env` keys |
 | `SlidesAsTextTests.swift` | Slides as text in the prompt, recognising providers' image rejections, old notes loading, and the whole flow against `MockModelServer`: a model listed as text-only, a rejection retried as text, other errors not retried, and image models still getting images. `LiveSlideDescriptionTests` prints Apple Intelligence's description of a drawn bar chart and only runs with `TEST_RUNNER_LMF_LIVE_APPLE=1` |
 | `SlideTermsTests.swift` | Picking slide words the transcript never says (case, short words, hyphens, possessives, the cap), where the term list goes in the prompt, and reading text from frames. `LiveSlideTermsTests` compares the on-device model's notes with and without the list and only runs with `TEST_RUNNER_LMF_LIVE_APPLE=1` |
@@ -536,7 +650,10 @@ xcodebuild test -project "Lecture Me Faster.xcodeproj" -scheme "Lecture Me Faste
 | `SlideCaptureTests.swift` | No slide lost: generated decks in one template, a one-formula change, a 3-second slide, a bullet build (kept complete), going back to a slide, heavy noise, and noise + webcam + fades together, each checked by reading the slides' text back; fade detection, build merging, picture-content scores, and which slides get images. Takes about 2 minutes (it encodes videos) |
 | `LectureHistoryTests.swift` | Saving and reloading lectures and slides, history order, saving notes later, one version per level and rewriting a level, old single-notes records, renaming (including when a toolbar edit should rename), part lists and loading records saved before them, delete/restore, delete for good, the 30-day expiry (with a test clock), ignoring broken folders, and reopening a saved lecture in a session |
 
-Not covered by automated tests: transcription of real speech (it depends on the system speech model),
+| `FoldersTests.swift` | Folders: saved across a relaunch, name order and unique names, renaming, deleting (lectures kept), moving lectures in, between and out, restoring a deleted lecture to its folder, records from before folders, and a lecture whose folder is missing |
+| `RedesignTests.swift` | Which progress steps a lecture shows and each one's state, the sidebar's date headings, the line saying where a lecture is sent, the logo's bars, and how long notes are split into pieces |
+
+Not covered by automated tests: the accuracy of transcription (it depends on the system speech model),
 live calls to real model servers, and the UI. When you change those areas, check them by hand with a
 real lecture.
 

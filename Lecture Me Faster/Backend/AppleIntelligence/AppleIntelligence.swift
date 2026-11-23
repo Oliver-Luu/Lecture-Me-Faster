@@ -96,13 +96,6 @@ nonisolated enum AppleIntelligence {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Greedy sampling (always the most likely next word) made the small model loop: measured on a real
-    /// 89-minute lecture (2026-11-13), one run took 78 minutes and another listed "B → [i]" … "B → [z]" at
-    /// 2.5 times the asked length. Off; a switch only so it can be measured again.
-    nonisolated(unsafe) static var usesGreedySampling = false
-    /// Sampling temperature for notes; nil uses the model's default. A switch so it can be measured.
-    nonisolated(unsafe) static var notesTemperature: Double? = nil
-
     /// Streams the model's reply to `parts` (text and slide images) with `system` as its instructions.
     /// The framework reports the whole reply so far each time; this yields just the new text.
     static func stream(_ parts: [FileToAI.Part], system: String, maximumTokens: Int) -> AsyncThrowingStream<String, Error> {
@@ -113,10 +106,9 @@ nonisolated enum AppleIntelligence {
                     let session = LanguageModelSession(model: .default, instructions: system)
                     let response = session.streamResponse(
                         to: prompt(from: parts),
-                        options: GenerationOptions(
-                            sampling: usesGreedySampling ? .greedy : nil, temperature: notesTemperature,
-                            maximumResponseTokens: maximumTokens
-                        )
+                        // The model's own sampling: always taking the most likely word made it loop on a
+                        // real 89-minute lecture (2026-11-13).
+                        options: GenerationOptions(samplingMode: nil, temperature: nil, maximumResponseTokens: maximumTokens)
                     )
                     var sent = ""
                     for try await snapshot in response {

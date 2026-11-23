@@ -21,7 +21,6 @@ nonisolated enum AudioToTranscription {
         _ url: URL,
         locale: Locale = .current,
         pieces: Int = 1,
-        tuning: PieceTuning = PieceTuning(),
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [TranscriptSegment] {
         let asset = AVURLAsset(url: url)
@@ -35,13 +34,10 @@ nonisolated enum AudioToTranscription {
         let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale)
         let speechLocale = supported ?? Locale(identifier: "en-US")
         // Each cut moves to the nearest pause, so no word is split between two pieces.
-        let even = evenCuts(duration: duration, pieces: pieces)
-        let cuts = tuning.alignToPauses ? even.map { quietestMoment(in: audioURL, near: $0) } : even
+        let cuts = evenCuts(duration: duration, pieces: pieces).map { quietestMoment(in: audioURL, near: $0) }
         let ranges = plan(duration: duration, cuts: cuts)
         if ranges.count > 1 {
-            return try await transcribeInPieces(
-                audioURL, ranges: ranges, locale: speechLocale, atOnce: tuning.atOnce, progress: progress
-            )
+            return try await transcribeInPieces(audioURL, ranges: ranges, locale: speechLocale, progress: progress)
         }
 
         let transcriber = SpeechTranscriber(locale: speechLocale, preset: .transcription)
@@ -58,7 +54,10 @@ nonisolated enum AudioToTranscription {
         } else {
             await analyzer.cancelAndFinishNow()
         }
-        return try await segments
+        let transcript = try await segments
+        // A stopped transcription can end early with only part of the speech; that isn't a transcript.
+        try Task.checkCancellation()
+        return transcript
     }
 
     private static func collect(
@@ -86,13 +85,6 @@ nonisolated enum AudioToTranscription {
     /// lecture: 1 piece 58 s, 2 pieces 32 s, 4 pieces 19 s.
     static let maxPieces = 4
 
-    /// Choices for how pieces are made, for measuring their effect; the app uses the defaults.
-    struct PieceTuning: Sendable {
-        /// Move each cut to the nearest pause.
-        var alignToPauses = true
-        /// Transcribe the pieces at the same time (otherwise one after another).
-        var atOnce = true
-    }
     static let minimumPieceSeconds = 300.0
     /// Each piece starts this long before its own range, so the recognizer has context at the cut; the
     /// text from the lead-in is dropped.
@@ -220,21 +212,13 @@ nonisolated enum AudioToTranscription {
     }
 
     private static func transcribeInPieces(
-        _ url: URL, ranges: [Piece], locale: Locale, atOnce: Bool, progress: @escaping @Sendable (Double) -> Void
+        _ url: URL, ranges: [Piece], locale: Locale, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [TranscriptSegment] {
         let installer = SpeechTranscriber(locale: locale, preset: .transcription)
         if let download = try await AssetInventory.assetInstallationRequest(supporting: [installer]) {
             try await download.downloadAndInstall()
         }
         let tracker = ProgressTracker(count: ranges.count, report: progress)
-        if !atOnce {
-            var results: [[TimedSegment]] = []
-            for (index, piece) in ranges.enumerated() {
-                results.append(try await transcribe(url, from: piece.start, to: piece.end, locale: locale) { tracker.update(index, $0) })
-            }
-            progress(1)
-            return merge(ranges, results)
-        }
         let results = try await withThrowingTaskGroup(of: (Int, [TimedSegment]).self) { group in
             for (index, piece) in ranges.enumerated() {
                 group.addTask {
@@ -248,6 +232,7 @@ nonisolated enum AudioToTranscription {
             for try await (index, segments) in group { out[index] = segments }
             return out
         }
+        try Task.checkCancellation()
         progress(1)
         return merge(ranges, results)
     }
@@ -266,6 +251,8 @@ nonisolated enum AudioToTranscription {
         )
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else { return [] }
+        // Opened before anything is started, so a file that can't be read leaves nothing running.
+        let file = try AVAudioFile(forReading: url)
         let length = max(end - start, 1)
         let collector = Task {
             var out: [TimedSegment] = []
@@ -292,9 +279,14 @@ nonisolated enum AudioToTranscription {
             return out
         }
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-        try await analyzer.start(inputSequence: stream)
+        do {
+            try await analyzer.start(inputSequence: stream)
+        } catch {
+            continuation.finish()
+            collector.cancel()
+            throw error
+        }
 
-        let file = try AVAudioFile(forReading: url)
         let source = file.processingFormat
         let rate = source.sampleRate
         let endFrame = min(AVAudioFramePosition(end * rate), file.length)

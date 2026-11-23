@@ -22,8 +22,11 @@ import Security
         var includeFrames = true
         var maxFrames = 30
         var noteDetail = NoteDetail.detailed
-        /// OpenAI-compatible servers can't be asked for their context window, so the user says.
+        /// The context window of the current OpenAI-format service's model. Most such servers can't be
+        /// asked, so the user says; a server whose model list gives it (OpenRouter, Gemini) fills it in.
         var openAIContextTokens = 32_768
+        /// The window last set for each other service, so one service's size is never used for another.
+        var serviceContextTokens: [String: Int] = [:]
         /// Ollama's context window: 0 uses what the model reports (capped at
         /// `LongLectures.maxLocalContextTokens`); any other value is used as is, for models that don't
         /// report one (Ollama's MLX builds) or to go above the cap.
@@ -63,6 +66,7 @@ import Security
             maxFrames = value(.maxFrames, defaults.maxFrames)
             noteDetail = value(.noteDetail, defaults.noteDetail)
             openAIContextTokens = value(.openAIContextTokens, defaults.openAIContextTokens)
+            serviceContextTokens = value(.serviceContextTokens, defaults.serviceContextTokens)
             ollamaContextTokens = value(.ollamaContextTokens, defaults.ollamaContextTokens)
             splitWithoutAsking = value(.splitWithoutAsking, defaults.splitWithoutAsking)
             transcribeInPieces = value(.transcribeInPieces, defaults.transcribeInPieces)
@@ -148,26 +152,25 @@ import Security
     /// The configuration for writing notes at `detail`: its own model if one is set, else the default.
     func configuration(for detail: NoteDetail?) throws -> AIConfiguration {
         guard let choice = modelChoice(for: detail) else { return try configuration() }
-        let level = detail?.label ?? ""
-        switch choice.provider {
-        case .apple:
-            if let reason = AppleIntelligence.unavailableReason { throw Problem.unavailable(reason) }
-            return Self.appleConfiguration
-        case .claude:
-            guard !anthropicKey.isEmpty else { throw Problem.missing("add your Anthropic API key (\(level) notes use Claude)") }
-            return AIConfiguration(provider: .claude, baseURL: URL(string: "https://api.anthropic.com")!, model: choice.model, apiKey: anthropicKey)
-        case .ollama:
-            guard let url = URL(string: stored.ollamaURL), url.host() != nil else {
-                throw Problem.missing("enter a valid Ollama server address (\(level) notes use Ollama)")
-            }
-            return AIConfiguration(provider: .ollama, baseURL: url, model: choice.model, apiKey: "")
-        case .openAICompatible:
-            let service = OpenAIService.with(id: choice.service ?? OpenAIService.custom.id)
-            guard let url = serviceURL(service) else { throw Problem.missing("enter a valid address for \(service.name)") }
-            let key = serviceKey(service)
-            if service.needsKey, key.isEmpty { throw Problem.missing("add your \(service.name) API key (\(level) notes use it)") }
-            return AIConfiguration(provider: .openAICompatible, baseURL: url, model: choice.model, apiKey: key)
+        return try configuration(
+            provider: choice.provider, service: OpenAIService.with(id: choice.service ?? OpenAIService.custom.id),
+            model: choice.model, level: detail?.label ?? ""
+        )
+    }
+
+    /// The Context window setting that applies to notes at `detail`: the setting of the service its model
+    /// is on. (Used only when that service's model list doesn't give the model's window.)
+    func contextSetting(for detail: NoteDetail?) -> Int {
+        guard let choice = modelChoice(for: detail), choice.provider == .openAICompatible else {
+            return stored.openAIContextTokens
         }
+        return contextSetting(forService: choice.service ?? OpenAIService.custom.id)
+    }
+
+    func contextSetting(forService id: String) -> Int {
+        id == stored.openAIService
+            ? stored.openAIContextTokens
+            : stored.serviceContextTokens[id] ?? Stored().openAIContextTokens
     }
 
     /// The model notes at `detail` will be written with, for showing ("Claude: claude-haiku-5-5").
@@ -184,40 +187,48 @@ import Security
         }
     }
 
-    /// The default model as a choice, so a level can be set to it.
-    var defaultModelChoice: ModelChoice? {
-        switch stored.provider {
-        case .apple: ModelChoice(provider: .apple, model: AppleIntelligence.modelID)
-        case .claude: ModelChoice(provider: .claude, model: stored.claudeModel)
-        case .ollama: stored.ollamaModel.isEmpty ? nil : ModelChoice(provider: .ollama, model: stored.ollamaModel)
-        case .openAICompatible:
-            stored.openAIModel.isEmpty ? nil : ModelChoice(provider: .openAICompatible, service: stored.openAIService, model: stored.openAIModel)
-        }
-    }
-
     /// Every provider that is set up well enough to list its models (an address, and a key where one is
     /// needed), for choosing a model per level.
     var usableConnections: [(name: String, service: String?, config: AIConfiguration)] {
-        var out: [(String, String?, AIConfiguration)] = []
-        if AppleIntelligence.unavailableReason == nil { out.append((AIProvider.apple.label, nil, Self.appleConfiguration)) }
-        if !anthropicKey.isEmpty {
-            out.append((AIProvider.claude.label, nil, AIConfiguration(provider: .claude, baseURL: URL(string: "https://api.anthropic.com")!, model: "", apiKey: anthropicKey)))
+        let providers: [(String, AIProvider, OpenAIService?)] =
+            [AIProvider.apple, .claude, .ollama].map { ($0.label, $0, nil) }
+            + menuServices.map { ($0.name, .openAICompatible, $0) }
+        return providers.compactMap { name, provider, service in
+            guard let config = try? configuration(
+                provider: provider, service: service ?? .custom, model: "", level: nil, needsModel: false
+            ) else { return nil }
+            return (name, service?.id, config)
         }
-        if let url = URL(string: stored.ollamaURL), url.host() != nil {
-            out.append((AIProvider.ollama.label, nil, AIConfiguration(provider: .ollama, baseURL: url, model: "", apiKey: "")))
-        }
-        for service in menuServices {
-            guard let url = serviceURL(service) else { continue }
-            let key = serviceKey(service)
-            if service.needsKey, key.isEmpty { continue }
-            out.append((service.name, service.id, AIConfiguration(provider: .openAICompatible, baseURL: url, model: "", apiKey: key)))
-        }
-        return out
     }
 
-    private func serviceURL(_ service: OpenAIService) -> URL? {
-        guard let url = URL(string: service.baseURL ?? stored.openAIURL), url.host() != nil else { return nil }
-        return url
+    /// Where requests for one model go: the one place that knows each provider's address and key, and
+    /// what to say when one is missing. `level` names the level whose own model this is, for the message.
+    private func configuration(
+        provider: AIProvider, service: OpenAIService, model: String, level: String?, needsModel: Bool = true
+    ) throws -> AIConfiguration {
+        func note(_ user: String) -> String { level.map { " (\($0) notes use \(user))" } ?? "" }
+        switch provider {
+        case .apple:
+            if let reason = AppleIntelligence.unavailableReason { throw Problem.unavailable(reason) }
+            return Self.appleConfiguration
+        case .claude:
+            guard !anthropicKey.isEmpty else { throw Problem.missing("add your Anthropic API key" + note("Claude")) }
+            return AIConfiguration(provider: .claude, baseURL: URL(string: "https://api.anthropic.com")!, model: model, apiKey: anthropicKey)
+        case .ollama:
+            guard let url = URL(string: stored.ollamaURL), url.host() != nil else {
+                throw Problem.missing("enter a valid Ollama server address" + note("Ollama"))
+            }
+            if needsModel, model.isEmpty { throw Problem.missing("choose an Ollama model") }
+            return AIConfiguration(provider: .ollama, baseURL: url, model: model, apiKey: "")
+        case .openAICompatible:
+            guard let url = URL(string: service.baseURL ?? stored.openAIURL), url.host() != nil else {
+                throw Problem.missing(level == nil ? "enter a valid server address" : "enter a valid address for \(service.name)")
+            }
+            let key = serviceKey(service)
+            if service.needsKey, key.isEmpty { throw Problem.missing("add your \(service.name) API key" + note("it")) }
+            if needsModel, model.isEmpty { throw Problem.missing("choose a \(service.name) model") }
+            return AIConfiguration(provider: .openAICompatible, baseURL: url, model: model, apiKey: key)
+        }
     }
 
     private func serviceKey(_ service: OpenAIService) -> String {
@@ -292,9 +303,11 @@ import Security
         guard service.id != stored.openAIService || stored.provider != .openAICompatible else { return }
         var updated = stored
         updated.serviceModels[updated.openAIService] = updated.openAIModel
+        updated.serviceContextTokens[updated.openAIService] = updated.openAIContextTokens
         updated.provider = .openAICompatible
         updated.openAIService = service.id
         updated.openAIModel = updated.serviceModels[service.id] ?? ""
+        updated.openAIContextTokens = updated.serviceContextTokens[service.id] ?? Stored().openAIContextTokens
         stored = updated
     }
 
@@ -340,32 +353,12 @@ import Security
 
     private var anthropicKey: String { claudeKey.isEmpty && persists ? DevKeys.anthropic : claudeKey }
 
-    private var currentServiceKey: String {
-        let typed = openAIKey
-        return typed.isEmpty && persists ? DevKeys.value(openAIService.devKeyName) : typed
-    }
-
-    private var currentServiceURL: URL? {
-        guard let url = URL(string: openAIService.baseURL ?? stored.openAIURL), url.host() != nil else { return nil }
-        return url
-    }
-
     /// The chosen provider's address and key, without requiring a model: enough to ask which models it
     /// offers. Nil when the address is invalid, or when a key is needed and missing.
     func connection() -> AIConfiguration? {
-        switch stored.provider {
-        case .apple:
-            return Self.appleConfiguration
-        case .claude:
-            guard !anthropicKey.isEmpty else { return nil }
-            return AIConfiguration(provider: .claude, baseURL: URL(string: "https://api.anthropic.com")!, model: "", apiKey: anthropicKey)
-        case .ollama:
-            guard let url = URL(string: stored.ollamaURL), url.host() != nil else { return nil }
-            return AIConfiguration(provider: .ollama, baseURL: url, model: "", apiKey: "")
-        case .openAICompatible:
-            guard let url = currentServiceURL, !(openAIService.needsKey && currentServiceKey.isEmpty) else { return nil }
-            return AIConfiguration(provider: .openAICompatible, baseURL: url, model: "", apiKey: currentServiceKey)
-        }
+        // Listed even when it can't be used right now, so the model list can say why.
+        if stored.provider == .apple { return Self.appleConfiguration }
+        return try? configuration(provider: stored.provider, service: openAIService, model: "", level: nil, needsModel: false)
     }
 
     /// The model notes will be written with, for showing next to a lecture ("Claude: claude-opus-5-5").
@@ -388,6 +381,7 @@ import Security
             stored.provider.rawValue, stored.claudeModel, stored.ollamaURL, stored.ollamaModel,
             stored.openAIService, stored.openAIURL, stored.openAIModel,
             String(stored.openAIContextTokens), String(stored.ollamaContextTokens),
+            stored.serviceContextTokens.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","),
             String(stored.maxFrames), String(stored.includeFrames),
             claudeKey, openAIKey,
             stored.levelModels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.provider.rawValue)/\($0.value.service ?? "")/\($0.value.model)" }.joined(separator: ","),
@@ -395,29 +389,13 @@ import Security
     }
 
     func configuration() throws -> AIConfiguration {
-        switch stored.provider {
-        case .apple:
-            if let reason = AppleIntelligence.unavailableReason { throw Problem.unavailable(reason) }
-            return Self.appleConfiguration
-        case .claude:
-            guard !anthropicKey.isEmpty else { throw Problem.missing("add your Anthropic API key") }
-            return AIConfiguration(
-                provider: .claude, baseURL: URL(string: "https://api.anthropic.com")!,
-                model: stored.claudeModel, apiKey: anthropicKey
-            )
-        case .ollama:
-            guard let url = URL(string: stored.ollamaURL), url.host() != nil else {
-                throw Problem.missing("enter a valid Ollama server address")
-            }
-            guard !stored.ollamaModel.isEmpty else { throw Problem.missing("choose an Ollama model") }
-            return AIConfiguration(provider: .ollama, baseURL: url, model: stored.ollamaModel, apiKey: "")
-        case .openAICompatible:
-            let service = openAIService
-            guard let url = currentServiceURL else { throw Problem.missing("enter a valid server address") }
-            if service.needsKey, currentServiceKey.isEmpty { throw Problem.missing("add your \(service.name) API key") }
-            guard !stored.openAIModel.isEmpty else { throw Problem.missing("choose a \(service.name) model") }
-            return AIConfiguration(provider: .openAICompatible, baseURL: url, model: stored.openAIModel, apiKey: currentServiceKey)
+        let model = switch stored.provider {
+        case .apple: AppleIntelligence.modelID
+        case .claude: stored.claudeModel
+        case .ollama: stored.ollamaModel
+        case .openAICompatible: stored.openAIModel
         }
+        return try configuration(provider: stored.provider, service: openAIService, model: model, level: nil)
     }
 }
 

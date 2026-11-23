@@ -4,7 +4,7 @@
 
 1. **Pick a model** (one-time). The app starts with **Apple Intelligence**, which is free, private, and
    runs on your Mac. If it says it's turned off, turn it on in System Settings > Apple Intelligence &
-   Siri. To use something else, click the gear icon to open Settings and choose a provider:
+   Siri. To use something else, click **Settings** at the bottom of the sidebar (or press ⌘,) and choose a provider:
    - **Ollama (local, free):** install [Ollama](https://ollama.com), then pull a model in Terminal, for
      example `ollama pull gemma3:12b`. It appears in the Model list. A model that can see images
      gets the slides as pictures; others get the text read from them instead (see "Models that can't
@@ -19,13 +19,16 @@
      open Add Provider… again and click **Remove**; its key is kept in case you add it back.
    - Each provider remembers its own key and model, so you can switch between them. Keys are stored in
      the Keychain.
-2. **Open a lecture.** Drag a video or audio file onto the main area of the window (not the sidebar),
-   or click **Choose Files…**. For a lecture split across several files, or with slides and readings,
+2. **Open a lecture.** Drag a video or audio file onto the rounded box in the main area of the window
+   (not the sidebar), or click **Add Files** in it. The box turns blue while files are over it. The two
+   buttons beside Add Files set how detailed the notes are and which model writes them, and the line
+   under the box says where your lecture will be sent. For a lecture split across several files, or with slides and readings,
    select them all (⌘-click or Shift-click on a Mac); see below. A **New Lecture** sheet opens where you
    name the lecture and choose the **model** and **how detailed** the first notes should be. Your choice
    is remembered for next time. Click **Make Notes**.
-3. **Wait for processing.** The app finds the slides and transcribes the speech on your device, then
-   the notes stream in as the model writes them.
+3. **Wait for processing.** The app lists its steps (read the materials, find the slides, transcribe
+   the speech, write the notes), ticks each one off as it finishes, and shows how far along the running
+   ones are. Then the notes stream in as the model writes them.
 
 ## Adding slides, handouts, and readings
 
@@ -65,7 +68,7 @@ recording) still adds its slides.
 ## Reading the results
 
 - **Notes:** the study notes. Drag across any part of them (headings, bullets and all) to copy a
-  section, or click **Copy Notes** in the toolbar (⇧⌘C) to copy the whole level you're viewing. Pasted
+  section, or click **Copy Notes** under the notes (⇧⌘C) to copy the whole level you're viewing. Pasted
   into Google Docs, Word, Pages or Notes it keeps its headings, bullets and bold; pasted into a plain-text
   app it comes as Markdown. The share button exports it.
 - **Transcript:** the on-device transcription with timestamps.
@@ -75,11 +78,12 @@ recording) still adds its slides.
 ### Notes at every level of detail
 
 A lecture can keep one set of notes at each level: **Key points**, **Concise**, **Detailed**, and
-**Complete**. Pick a level at the top of the Notes tab; a ✓ marks the levels already written. For a
+**Complete**. Pick a level at the top of the Notes tab. A filled blue dot marks a level that is already written, a
+ring one that isn't, and a spinner the one being written now. For a
 level that isn't written yet, click **Write … Notes**. The slides, transcript, and materials are reused,
 so nothing is reprocessed, and the other levels are kept.
 
-**Rewrite These Notes** (the circular arrow) writes the level you're viewing again, for example after
+**Rewrite These Notes** (the circular arrow under the notes) writes the level you're viewing again, for example after
 switching models or changing whether slides are sent. It replaces only that level. Each set of notes
 shows which model wrote it and when. Only one level is written at a time.
 
@@ -150,23 +154,24 @@ testing.
 
 In Settings, **Model for each level of detail** lets each level use its own model: for example Claude
 Haiku (fast and cheap) for **Key points**, and Claude Opus or Fable (the strongest) for **Complete**. A
-level left at **Same as default** uses the model chosen at the top of Settings. The menus list every
+level left on **Default** uses the model chosen at the top of Settings. The menus list every
 provider you've set up (a key for Claude or a service, or an Ollama address), so a level can also use a
-free local model. The lecture toolbar, the split message, and the line under the notes show which model
-a level uses. You can also change the shown level's model from the toolbar's model button.
+free local model. The model name at the top left of the lecture, the split message, and the line under the notes show which model
+a level uses. You can also change the shown level's model by clicking that name.
 
 ## Changing the model for a lecture
 
-The toolbar of every lecture shows the model notes are written with (for example "Claude:
+The top left of every lecture shows the model notes are written with (for example "Claude:
 claude-opus-5-5"). Click it to pick another provider or model, or to fix a key, without opening
 Settings. Then click **Rewrite … Notes** (or **Write … Notes** for a level you haven't written) in the
 same popover. The choice is remembered for new lectures too.
 
 ## History
 
-Every lecture you open is saved in the **History** list in the sidebar, newest first. It is saved as
+Every lecture you open is saved in the sidebar, newest first, under **Today**, **Previous 7 Days**, or
+**Earlier** (or in a folder once you file it; see Folders below). It is saved as
 soon as the slides and transcript are ready, so even if the model fails you can come back later and
-write the notes from its Notes tab without reprocessing the file. Lectures marked **Notes unfinished**
+write the notes from its Notes tab without reprocessing the file. Lectures marked with an orange dot and **No notes yet**
 have a transcript and slides but no notes yet.
 
 Click a lecture to read its notes, transcript, and slides. You can keep reading old lectures while a
@@ -174,6 +179,21 @@ new one is processing.
 
 The history keeps the slides, transcript, and notes, not the original video or audio file. Everything
 is stored on this device only.
+
+## Folders
+
+Folders keep a course's lectures together in the sidebar.
+
+- **Make a folder:** click **New Folder** near the top of the sidebar, under New Lecture, and type a name.
+- **File a lecture:** right-click it (or several selected lectures) and choose **Move to Folder**, then a
+  folder. **New Folder…** in that menu makes a folder and files them in one step.
+- **Take a lecture out:** right-click it and choose **Move to Folder > Remove from Folder**. It goes back
+  under Today, Previous 7 Days, or Earlier.
+- **Rename or delete a folder:** right-click the folder. Deleting a folder keeps its lectures; they go
+  back to the unfiled list.
+- Click the arrow beside a folder to hide or show its lectures. The number beside it is how many it holds.
+
+A new lecture starts in no folder. A lecture you delete and later restore returns to its folder.
 
 ## Renaming a lecture
 
@@ -220,7 +240,7 @@ was open.
 | Split long lectures without asking | Write lectures too long for the model in parts without asking first |
 | Transcribe long recordings in pieces | On (default): a long recording's audio is split at pauses into up to 4 pieces transcribed at once, about 3 times faster with the same accuracy in testing, though a few words can differ between runs. Off: one pass, the same transcript every time |
 | Context window (Ollama) | **Automatic** uses what the model reports, up to 262,144 tokens. Choose a size for models that don't report one (Ollama's MLX versions show 32,768 otherwise), within what the model supports. Bigger windows let a long lecture go in one request but use more memory |
-| Context window (OpenAI, Gemini, DeepSeek, OpenRouter, LM Studio, Other) | How many tokens the server's model is loaded with; longer lectures are split to fit. Filled in automatically when the server's model list says (OpenRouter does) |
+| Context window (OpenAI, Gemini, DeepSeek, OpenRouter, LM Studio, Other) | How many tokens the server's model is loaded with; longer lectures are split to fit. Filled in automatically when the service says (OpenRouter and Google Gemini do). Each service keeps its own value, so a small size set for a local server isn't used for a hosted one |
 | Send up to N slides as images per request | How many slides go to the model as pictures in each request (5–100). A long lecture written in several requests gets this many in each, so more of its slides are seen as pictures. Every slide (up to 1,000 per recording, or one per 5 seconds of a longer recording) is still kept and sent; the rest go as the text on them |
 
 ## What leaves your device
@@ -259,7 +279,13 @@ the model name instead.
 **"Can't reach Ollama at this address."** Start the Ollama app, and check the Server field (the default
 is `http://localhost:11434`). On iPhone or iPad, enter the address of the Mac running Ollama.
 
-**"This file has no audio track to transcribe."** The file is a silent video. The app needs speech.
+**"This file has no audio track to transcribe."** The file has no sound, and no slides were found in
+it either, so there is nothing to write notes from. A silent screen recording that does show slides
+gets notes from the slides, with a notice that no speech was recognized.
+
+**"The model answered with no text, so no notes were saved."** The request worked but the reply was
+empty. Click **Write … Notes** to try again, or choose another model by clicking the model name at the top left. Some local
+models spend their whole reply "thinking" and write nothing.
 
 **"Some Files Can't Be Used."** The app reads video, audio, PDF, Word (.docx), PowerPoint (.pptx),
 text, and image files. Export other documents as PDF. Drop onto the main area, not the sidebar.

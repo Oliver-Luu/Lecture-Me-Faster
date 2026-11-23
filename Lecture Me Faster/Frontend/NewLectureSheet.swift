@@ -78,12 +78,6 @@ struct NewLectureSheet: View {
                     Text(summaryText)
                 }
 
-                Section {
-                    Button("Add Files…", systemImage: "plus") { isAddingFiles = true }
-                } footer: {
-                    Text("Add more recording parts or materials here, or drop them onto this window.")
-                }
-
                 if !recordings.isEmpty {
                     Section {
                         ForEach(recordings, id: \.self) { url in
@@ -91,10 +85,10 @@ struct NewLectureSheet: View {
                         }
                         .onMove { files.moveRecordings(fromOffsets: $0, toOffset: $1) }
                     } header: {
-                        Text(recordings.count > 1 ? "Recording parts, in playing order" : "Recording")
+                        Text(recordings.count > 1 ? "Recording, in playing order" : "Recording")
                     } footer: {
                         if recordings.count > 1 {
-                            Text("Sorted by file name. Each part continues where the one before it ends.")
+                            Text("Sorted by file name. Use the arrows if a part is out of order.")
                         }
                     }
                 }
@@ -107,8 +101,14 @@ struct NewLectureSheet: View {
                     } header: {
                         Text("Materials")
                     } footer: {
-                        Text("Text is read from these on this device and given to the model as extra context. Scanned pages and images are read with text recognition, which takes longer.")
+                        Text("Their text is read on this device and given to the model as context. Scanned pages and images take longer.")
                     }
+                }
+
+                Section {
+                    Button("Add Files…", systemImage: "plus") { isAddingFiles = true }
+                } footer: {
+                    Text("More parts of the recording, or slides and readings. You can also drop them onto this window.")
                 }
 
                 Section {
@@ -118,14 +118,14 @@ struct NewLectureSheet: View {
                     Text("Notes")
                 } footer: {
                     if let problem = modelProblem {
-                        Label("\(problem) Until then the slides and transcript are still saved, and you can write the notes later from the Notes tab.", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                        Notice(.warning, "\(problem) The slides and transcript are saved either way, and the notes can be written later from the Notes tab.")
                     } else {
-                        Text("Your choice is remembered for next time. Change it any time in Settings.")
+                        Text("These choices are remembered for the next lecture.")
                     }
                 }
             }
             .formStyle(.grouped)
+            .canvasBackground()
             .dropDestination(for: URL.self) { urls, _ in
                 let usable = urls.filter { LectureSession.isLectureFile($0) || DocumentToText.kind(of: $0) != nil }
                 files.add(usable)

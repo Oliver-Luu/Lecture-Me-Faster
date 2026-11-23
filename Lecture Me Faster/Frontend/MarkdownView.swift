@@ -12,13 +12,74 @@ struct MarkdownView: View {
         case rule
     }
 
-    /// One `Text` for the whole document, so a selection can run across headings, bullets and paragraphs
-    /// (separate `Text` views each had their own selection, so only one line could be copied at a time).
+    /// Short notes are one `Text`, so a selection can run across headings, bullets and paragraphs.
+    /// Long notes are several, split at headings and stacked lazily, so only the sections on screen are
+    /// laid out: one `Text` holding 120,000 characters took 300 ms to lay out each time a lecture was
+    /// opened (measured 2026-11-16). A selection then stays inside one section; Copy Notes copies it all.
     var body: some View {
-        Text(Self.document(from: Self.blocks(from: text)))
-            .textSelection(.enabled)
-            .lineSpacing(3)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        LazyVStack(alignment: .leading, spacing: Self.sectionSpacing) {
+            ForEach(Array(Self.sections(for: text).enumerated()), id: \.offset) { _, section in
+                Text(section)
+                    .textSelection(.enabled)
+                    .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// About the height of the blank line that separates blocks inside a section.
+    private static let sectionSpacing: CGFloat = 21
+
+    /// A section is closed at the next heading once it holds this many characters.
+    static let sectionCharacters = 6_000
+
+    /// The notes most recently shown, already parsed, so switching back to a lecture or redrawing the
+    /// screen doesn't parse them again. Emptied by the system when memory is short.
+    private static let cache: NSCache<NSString, ParsedNotes> = {
+        let cache = NSCache<NSString, ParsedNotes>()
+        cache.countLimit = 12
+        return cache
+    }()
+
+    private final class ParsedNotes {
+        let sections: [AttributedString]
+        init(_ sections: [AttributedString]) { self.sections = sections }
+    }
+
+    static func sections(for text: String) -> [AttributedString] {
+        if let cached = cache.object(forKey: text as NSString) { return cached.sections }
+        let sections = sections(of: blocks(from: text)).map(document(from:))
+        cache.setObject(ParsedNotes(sections), forKey: text as NSString)
+        return sections
+    }
+
+    /// The blocks in groups to show as separate pieces of text. A new group starts at a heading once the
+    /// current one has `limit` characters, or anywhere outside a list once it has four times that (notes
+    /// with no headings). Notes shorter than `limit` stay in one group.
+    static func sections(of blocks: [Block], limit: Int = sectionCharacters) -> [[Block]] {
+        var sections: [[Block]] = []
+        var current: [Block] = []
+        var count = 0
+        for block in blocks {
+            let isHeading = { if case .heading = block { true } else { false } }()
+            let isItem = { if case .listItem = block { true } else { false } }()
+            if !current.isEmpty, (isHeading && count >= limit) || (!isItem && count >= limit * 4) {
+                sections.append(current)
+                current = []
+                count = 0
+            }
+            current.append(block)
+            count += characters(in: block)
+        }
+        if !current.isEmpty { sections.append(current) }
+        return sections
+    }
+
+    private static func characters(in block: Block) -> Int {
+        switch block {
+        case .heading(_, let text), .listItem(_, _, let text), .code(let text), .paragraph(let text): text.count
+        case .rule: 0
+        }
     }
 
     /// The blocks as one attributed string: headings in larger bold type, list items indented with their
@@ -35,7 +96,8 @@ struct MarkdownView: View {
             switch block {
             case .heading(let level, let text):
                 var heading = inline(text)
-                heading.font = level == 1 ? .title.bold() : level == 2 ? .title2.bold() : .headline
+                // Three steps of size, so the outline of the lecture shows at a glance.
+                heading.font = level == 1 ? .title.bold() : level == 2 ? .title3.weight(.semibold) : .headline
                 document += heading
             case .listItem(let indent, let marker, let text):
                 var prefix = AttributedString(String(repeating: "    ", count: indent) + marker + "  ")
@@ -44,7 +106,7 @@ struct MarkdownView: View {
             case .code(let code):
                 var block = AttributedString(code)
                 block.font = .callout.monospaced()
-                block.backgroundColor = Color.secondary.opacity(0.15)
+                block.backgroundColor = Color.secondary.opacity(0.12)
                 document += block
             case .paragraph(let text):
                 document += inline(text)

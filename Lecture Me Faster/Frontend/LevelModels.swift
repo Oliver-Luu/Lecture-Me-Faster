@@ -46,7 +46,7 @@ struct LevelModelPicker: View {
 
     var body: some View {
         Picker(detail.label, selection: selection) {
-            Text("Same as default (\(settings.chosenModelName))").tag(AppSettings.ModelChoice?.none)
+            Text("Default: \(settings.chosenModelName)").tag(AppSettings.ModelChoice?.none)
             // A saved choice stays listed even when its provider's list can't be loaded right now.
             if let current = settings.modelChoice(for: detail), !models.groups.contains(where: { $0.choices.contains(current) }) {
                 Text(AppSettings.name(of: current)).tag(Optional(current))
@@ -82,7 +82,7 @@ struct LevelModelsSection: View {
                 if models.isLoading { ProgressView().controlSize(.small) }
             }
         } footer: {
-            Text("For example a fast, cheap model for Key points and the strongest for Complete. A level set to \"Same as default\" uses the model chosen above. The menus list every provider that is set up (with its key or address).")
+            Text("For example a fast, cheap model for Key points and the strongest for Complete. A level left on Default uses the model chosen above. The menus list every provider that is set up (with its key or address).")
         }
         .task(id: connectionKey) { await models.load(settings) }
     }

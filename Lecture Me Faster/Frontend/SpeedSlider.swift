@@ -6,15 +6,14 @@ struct SpeedSlider: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Slider(value: position, in: 0...2, step: 1) {
-                Text("Speed")
-            } minimumValueLabel: {
-                Text("Faster")
-            } maximumValueLabel: {
-                Text("Most accurate")
+        VStack(alignment: .leading, spacing: Metrics.small) {
+            HStack(spacing: Metrics.small) {
+                Text("Faster").foregroundStyle(.secondary)
+                Slider(value: position, in: 0...2, step: 1) { Text("Speed") }
+                    .labelsHidden()
+                    .accessibilityValue(settings.speedPreset?.label ?? "Custom")
+                Text("Most accurate").foregroundStyle(.secondary)
             }
-            .accessibilityValue(settings.speedPreset?.label ?? "Custom")
             Text(settings.speedPreset.map { "\($0.label): \($0.summary)" } ?? "Custom: you've changed these settings under Advanced. Move the slider to use a preset again.")
                 .font(.callout)
                 .foregroundStyle(.secondary)

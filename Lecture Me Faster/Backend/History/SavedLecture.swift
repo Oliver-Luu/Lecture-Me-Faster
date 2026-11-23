@@ -26,6 +26,9 @@ nonisolated struct SavedLecture: Identifiable, Codable, Sendable, Equatable {
     var documents: [LectureDocument]?
     /// One set of notes per detail level. `nil` in records saved before versions existed.
     var notes: [NoteVersion]?
+    /// The folder the lecture is filed in. `nil` when it is in no folder, and in records saved before
+    /// folders existed.
+    var folderID: UUID? = nil
 
     /// Every version of the notes, including notes from an older record, which become one version with
     /// no detail level ("Earlier notes").
@@ -55,4 +58,11 @@ nonisolated struct NoteVersion: Codable, Sendable, Equatable {
     static func ordered(_ versions: [NoteVersion]) -> [NoteVersion] {
         versions.sorted { ($0.detail?.rawValue ?? -1) < ($1.detail?.rawValue ?? -1) }
     }
+}
+
+/// A folder in the sidebar, for keeping a course's lectures together. A lecture names its folder in
+/// `SavedLecture.folderID`; the folder itself is only a name.
+nonisolated struct LectureFolder: Identifiable, Codable, Sendable, Equatable {
+    var id: UUID
+    var name: String
 }

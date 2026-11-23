@@ -4,10 +4,9 @@ import Testing
 
 struct MediaPipelineTests {
     @Test func thinningKeepsEvenlySpacedFramesUpToTheLimit() {
-        let frames = (0..<10).map { LectureFrame(seconds: Double($0), jpeg: Data()) }
-        #expect(VideoToFrames.thinned(frames, to: 5).map(\.seconds) == [0, 2, 4, 6, 8])
-        #expect(VideoToFrames.thinned(frames, to: 10).count == 10)
-        #expect(VideoToFrames.thinned(frames, to: 50).count == 10)
+        #expect(VideoToFrames.thinnedIndices(count: 10, to: 5) == [0, 2, 4, 6, 8])
+        #expect(VideoToFrames.thinnedIndices(count: 10, to: 10).count == 10)
+        #expect(VideoToFrames.thinnedIndices(count: 10, to: 50).count == 10)
     }
 
     @Test func blockDifferencesLocateAChange() {

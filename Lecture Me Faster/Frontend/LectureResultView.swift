@@ -39,6 +39,8 @@ struct LectureResultView: View {
     @State private var level: NotesLevel?
     @State private var selectedSegments: Set<TranscriptSegment.ID> = []
     @State private var isChoosingModel = false
+    /// True for a moment after Copy Notes, so the button can show it worked.
+    @State private var didCopy = false
     @State private var replanTask: Task<Void, Never>?
 
     /// Every level, plus "Earlier notes" when an older lecture has them.
@@ -63,52 +65,27 @@ struct LectureResultView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("View", selection: $tab) {
-                ForEach(tabs, id: \.self) { Text($0.rawValue) }
+            // The model on the left and the tabs on the right; stacked when the window is too narrow.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Metrics.medium) {
+                    modelButton
+                    Spacer(minLength: Metrics.small)
+                    tabPicker
+                }
+                VStack(alignment: .leading, spacing: Metrics.small) {
+                    modelButton
+                    tabPicker
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: tabs.count > 3 ? 460 : 360)
-            .padding()
+            .padding(.horizontal, Metrics.large)
+            .padding(.vertical, Metrics.medium)
 
             switch tab {
             case .notes: notes
             case .transcript: transcript
             case .slides: slides
             case .materials: MaterialsList(documents: session.documents)
-            }
-        }
-        .toolbar {
-            ToolbarItem {
-                Button { isChoosingModel = true } label: {
-                    Label(settings.chosenModelName(for: shownLevel.detail), systemImage: "cpu")
-                        .labelStyle(.titleAndIcon)
-                }
-                .help("Change the model notes are written with")
-                .popover(isPresented: $isChoosingModel) {
-                    ModelSwitcher(
-                        detail: shownLevel.detail,
-                        actionTitle: canWrite(shownLevel) ? (session.hasVersion(shownLevel.detail) ? "Rewrite \(shownLevel.label) Notes" : "Write \(shownLevel.label) Notes") : nil,
-                        action: { write(shownLevel) }
-                    )
-                }
-            }
-            ToolbarItem {
-                Button("Copy Notes", systemImage: "doc.on.doc") {
-                    Self.copyNotes(session.notes(for: shownLevel.detail))
-                }
-                .help("Copy all of these notes, with headings and bullets, to paste into a document")
-                .keyboardShortcut("c", modifiers: [.command, .shift])
-                .disabled(session.notes(for: shownLevel.detail).isEmpty || isWritingShownLevel)
-            }
-            ToolbarItem {
-                ShareLink(item: session.notes(for: shownLevel.detail))
-                    .disabled(session.notes(for: shownLevel.detail).isEmpty || isWritingShownLevel)
-            }
-            ToolbarItem {
-                Button("Rewrite These Notes", systemImage: "arrow.clockwise") { write(shownLevel) }
-                    .help("Write the \(shownLevel.label) notes again, keeping the other levels")
-                    .disabled(!canWrite(shownLevel))
             }
         }
         // When notes start being written (a new lecture, or Write/Rewrite), show that level.
@@ -128,6 +105,89 @@ struct LectureResultView: View {
         }
     }
 
+    private var tabPicker: some View {
+        Picker("View", selection: $tab) {
+            ForEach(tabs, id: \.self) { Text($0.rawValue) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+    }
+
+    /// The model the shown level is written with, always at the top left of the lecture. Clicking it
+    /// opens the model switcher. (It used to be a toolbar item, which macOS hid in the overflow menu
+    /// whenever the lecture's name or the model's name was long.)
+    private var modelButton: some View {
+        Button { isChoosingModel = true } label: {
+            HStack(spacing: Metrics.tight) {
+                Text(settings.chosenModelName(for: shownLevel.detail))
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, Metrics.tight)
+            .padding(.horizontal, Metrics.small)
+            .contentShape(.rect)
+            .hoverHighlight()
+        }
+        .buttonStyle(.plain)
+        // Keeps the name's left edge where it was before the padding the highlight needs.
+        .padding(.leading, -Metrics.small)
+        .help("Change the model notes are written with")
+        .accessibilityLabel("Model: \(settings.chosenModelName(for: shownLevel.detail))")
+        .accessibilityHint("Changes the model notes are written with")
+        .popover(isPresented: $isChoosingModel, arrowEdge: .bottom) {
+            ModelSwitcher(
+                detail: shownLevel.detail,
+                actionTitle: canWrite(shownLevel) ? (session.hasVersion(shownLevel.detail) ? "Rewrite \(shownLevel.label) Notes" : "Write \(shownLevel.label) Notes") : nil,
+                action: { write(shownLevel) }
+            )
+        }
+    }
+
+    /// Under finished notes: copy, share, write again, and who wrote them.
+    private func actionRow(text: String, version: NoteVersion?) -> some View {
+        HStack(spacing: Metrics.tight) {
+            Button(didCopy ? "Copied" : "Copy Notes", systemImage: didCopy ? "checkmark" : "doc.on.doc") {
+                Self.copyNotes(text)
+                didCopy = true
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    didCopy = false
+                }
+            }
+            .help("Copy all of these notes, with headings and bullets, to paste into a document")
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            .padding(Metrics.tight)
+            .hoverHighlight()
+            ShareLink(item: text)
+                .help("Share these notes")
+                .padding(Metrics.tight)
+                .hoverHighlight()
+            Button("Rewrite These Notes", systemImage: "arrow.clockwise") { write(shownLevel) }
+                .help("Write the \(shownLevel.label) notes again, keeping the other levels")
+                .disabled(!canWrite(shownLevel))
+                .padding(Metrics.tight)
+                .hoverHighlight()
+            if let version {
+                Text(caption(for: version))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.leading, Metrics.small)
+            }
+        }
+        .padding(.leading, -Metrics.tight)
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        // Quiet, like the row under a chat reply: the notes are what the eye should land on.
+        .foregroundStyle(.secondary)
+        .imageScale(.large)
+    }
+
     private func canWrite(_ level: NotesLevel) -> Bool {
         level.detail != nil && session.hasSource && session.phase != .summarizing && session.phase != .processing
     }
@@ -139,50 +199,35 @@ struct LectureResultView: View {
 
     private var notes: some View {
         VStack(spacing: 0) {
-            Picker("Detail", selection: Binding { shownLevel } set: { level = $0 }) {
-                ForEach(levels, id: \.self) { level in
-                    // ✓ marks levels that have been written.
-                    Text(session.hasVersion(level.detail) ? "\(level.label) ✓" : level.label)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 560)
-            .padding(.horizontal)
-            .padding(.bottom, 8)
+            ScrollView(.horizontal) { levelBar }
+                .scrollIndicators(.hidden)
+                .readingColumn()
+                .padding(.bottom, Metrics.small)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: Metrics.regular) {
                     if let proposal = splitProposalForShownLevel {
                         SplitProposalCard(proposal: proposal)
                     }
                     if let error = errorForShownLevel {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
+                        Notice(.failure, error)
                     }
                     let text = session.notes(for: shownLevel.detail)
                     let shownVersion = session.versions.first { $0.detail == shownLevel.detail }
                     if session.transcript.isEmpty, !session.frames.isEmpty, isWritingShownLevel || !text.isEmpty {
-                        Label(Self.noSpeechWarning, systemImage: "waveform.slash")
-                            .font(.callout)
-                            .foregroundStyle(.orange)
+                        Notice(.warning, Self.noSpeechWarning)
                     }
                     if isWritingShownLevel ? session.isSendingSlidesAsText : (!text.isEmpty && shownVersion?.slidesAsText == true) {
-                        Label(Self.slidesAsTextWarning, systemImage: "exclamationmark.triangle")
-                            .font(.callout)
-                            .foregroundStyle(.orange)
+                        Notice(.warning, Self.slidesAsTextWarning)
                     }
                     if !text.isEmpty {
-                        if let version = shownVersion, !isWritingShownLevel {
-                            Text(caption(for: version))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                         MarkdownView(text: text)
+                        if !isWritingShownLevel {
+                            actionRow(text: text, version: shownVersion)
+                        }
                     }
                     if isWritingShownLevel {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Metrics.small) {
                             ProgressView().controlSize(.small)
                             Text(progressText(hasText: !text.isEmpty))
                                 .foregroundStyle(.secondary)
@@ -191,37 +236,64 @@ struct LectureResultView: View {
                         missingVersion
                     }
                 }
-                .frame(maxWidth: 760, alignment: .leading)
-                .padding()
-                .frame(maxWidth: .infinity)
+                .readingColumn()
+                .padding(.vertical, Metrics.regular)
             }
         }
+    }
+
+    /// The levels of detail side by side. A filled dot marks a level that has been written, a ring one
+    /// that hasn't, and a spinner the one being written now.
+    private var levelBar: some View {
+        HStack(spacing: Metrics.tight) {
+            ForEach(levels, id: \.self) { item in
+                let isSelected = item == shownLevel
+                let state = levelState(item)
+                Button { level = item } label: {
+                    HStack(spacing: Metrics.small) {
+                        LevelMarker(state: state)
+                        Text(item.label)
+                            .fontWeight(isSelected ? .semibold : .regular)
+                    }
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                    .padding(.horizontal, Metrics.medium)
+                    .padding(.vertical, Metrics.small)
+                    .background(isSelected ? AnyShapeStyle(.tint.opacity(0.16)) : AnyShapeStyle(.clear), in: .capsule)
+                    .contentShape(.capsule)
+                    .hoverHighlight(.capsule)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(item.label) notes")
+                .accessibilityValue(state.spokenName)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+    }
+
+    private func levelState(_ item: NotesLevel) -> LevelMarker.State {
+        if session.phase == .summarizing, item != .earlier, session.writingDetail == item.detail { return .writing }
+        return session.hasVersion(item.detail) ? .written : .unwritten
     }
 
     /// Shown for a level that hasn't been written yet.
     @ViewBuilder private var missingVersion: some View {
         if let detail = shownLevel.detail, session.phase != .processing {
-            VStack(spacing: 12) {
-                Text("No \(detail.label) notes yet")
-                    .font(.headline)
-                Text(detail.summary)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            EmptyState(title: "No \(detail.label) notes yet", message: detail.summary) {
                 Button("Write \(detail.label) Notes") { write(shownLevel) }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .disabled(!canWrite(shownLevel))
                 if session.phase == .summarizing, let writing = session.writingDetail {
-                    Text("Wait for the \(writing.label) notes to finish.")
+                    Text("Available once the \(writing.label) notes are finished.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else if !session.hasSource {
-                    Text("This lecture has no transcript or material text to write notes from.")
+                    Text("This lecture has no transcript, slides or material text to write notes from.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 40)
+            .padding(.top, Metrics.large)
         }
     }
 
@@ -253,7 +325,7 @@ struct LectureResultView: View {
 
     static let noSpeechWarning = """
         No speech was recognized in this recording, so these notes come from the slides only. If the \
-        lecture has a spoken voice, check the Transcript tab and that the speech is in your Mac's language.
+        lecture has a spoken voice, check the Transcript tab and that the speech is in your device's language.
         """
 
     static let slidesAsTextWarning = """
@@ -286,13 +358,16 @@ struct LectureResultView: View {
     /// (Rows don't allow selecting text inside them, which would swallow the clicks that select rows.)
     private var transcript: some View {
         List(session.transcript, selection: $selectedSegments) { segment in
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: Metrics.medium) {
                 Text(timestamp(segment.seconds))
-                    .font(.caption.monospacedDigit())
+                    .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .frame(width: 60, alignment: .trailing)
                 Text(segment.text)
             }
+            .padding(.vertical, Metrics.tight / 2)
         }
+        .canvasBackground()
         .contextMenu(forSelectionType: TranscriptSegment.ID.self) { ids in
             if !ids.isEmpty {
                 Button(ids.count == 1 ? "Copy" : "Copy \(ids.count) Lines", systemImage: "doc.on.doc") {
@@ -308,55 +383,128 @@ struct LectureResultView: View {
         #endif
         .overlay {
             if session.transcript.isEmpty {
-                ContentUnavailableView(
-                    "No transcript", systemImage: "text.quote",
-                    description: Text(session.frames.isEmpty && session.documents.isEmpty
-                        ? "This lecture has no recording."
-                        : "No speech was recognized in this recording. Check that the file has spoken audio in your Mac's language.")
-                )
+                EmptyState("No transcript", session.frames.isEmpty && session.documents.isEmpty
+                    ? "This lecture has no recording."
+                    : "No speech was recognized. Check that the recording has spoken audio in your device's language.")
             }
         }
     }
 
     private var slides: some View {
         ScrollView {
-            if let note = Self.slidesNote(kept: session.frames.count, distinct: session.distinctFrameCount, imageLimit: settings.stored.maxFrames) {
-                Text(note)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
-                ForEach(session.frames) { frame in
-                    VStack(alignment: .leading, spacing: 4) {
-                        FrameImage(jpeg: frame.jpeg)
-                        Text(timestamp(frame.seconds))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: Metrics.regular) {
+                if let note = Self.slidesNote(kept: session.frames.count, distinct: session.distinctFrameCount, imageLimit: settings.stored.maxFrames) {
+                    Notice(.info, note)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: Metrics.regular)], spacing: Metrics.regular) {
+                    ForEach(session.frames) { frame in
+                        VStack(alignment: .leading, spacing: Metrics.tight) {
+                            FrameImage(frame: frame)
+                            Text(timestamp(frame.seconds))
+                                .font(.callout.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
-            .padding()
+            .padding(.horizontal, Metrics.large)
+            .padding(.vertical, Metrics.regular)
         }
         .overlay {
             if session.frames.isEmpty {
-                ContentUnavailableView("No slides", systemImage: "photo.on.rectangle", description: Text("Audio-only lectures have no frames."))
+                EmptyState("No slides", "Slides come from video. This lecture has none.")
             }
         }
     }
 }
 
-private struct FrameImage: View {
-    let jpeg: Data
+/// The dot beside a level of detail's name.
+private struct LevelMarker: View {
+    enum State {
+        case unwritten, writing, written
+
+        var spokenName: String {
+            switch self {
+            case .unwritten: "Not written yet"
+            case .writing: "Being written"
+            case .written: "Written"
+            }
+        }
+    }
+
+    let state: State
 
     var body: some View {
-        if let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
-           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-            Image(decorative: image, scale: 1)
-                .resizable()
-                .scaledToFit()
-                .clipShape(.rect(cornerRadius: 6))
+        Group {
+            switch state {
+            case .unwritten: Circle().strokeBorder(.tertiary, lineWidth: 1.5)
+            case .writing: ProgressView().controlSize(.mini)
+            case .written: Circle().fill(.tint)
+            }
         }
+        .frame(width: 8, height: 8)
+        .accessibilityHidden(true)
+    }
+}
+
+private extension View {
+    /// Centres content in a column no wider than a comfortable line of text.
+    func readingColumn() -> some View {
+        frame(maxWidth: Metrics.readingWidth, alignment: .leading)
+            .padding(.horizontal, Metrics.large)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+/// One slide in the Slides tab, shown as a small copy made off the main thread and kept for next time.
+/// (Decoding the full-size JPEG in `body` ran again for every slide on every redraw and scroll.)
+private struct FrameImage: View {
+    let frame: LectureFrame
+    @State private var image: CGImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Rectangle()
+                    .fill(.quaternary)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+            }
+        }
+        .clipShape(.rect(cornerRadius: Metrics.cornerRadius))
+        // A hairline, so a white slide has an edge on a white window.
+        .overlay { RoundedRectangle(cornerRadius: Metrics.cornerRadius).strokeBorder(.quaternary) }
+        .task(id: frame.id) { image = await FrameThumbnails.thumbnail(for: frame) }
+    }
+}
+
+/// Small copies of slide images for the Slides tab.
+nonisolated enum FrameThumbnails {
+    /// The longest side in pixels: twice the 260-point grid cell, for Retina screens.
+    static let maxPixels = 640
+
+    /// Emptied by the system when memory is short.
+    private nonisolated(unsafe) static let cache = NSCache<NSUUID, CGImage>()
+
+    @concurrent
+    static func thumbnail(for frame: LectureFrame) async -> CGImage? {
+        if let cached = cache.object(forKey: frame.id as NSUUID) { return cached }
+        guard let image = thumbnail(from: frame.jpeg) else { return nil }
+        cache.setObject(image, forKey: frame.id as NSUUID)
+        return image
+    }
+
+    static func thumbnail(from jpeg: Data, maxPixels: Int = maxPixels) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        ] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options)
     }
 }
 
@@ -372,20 +520,23 @@ private struct SplitProposalCard: View {
     var body: some View {
         @Bindable var settings = settings
 
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Metrics.medium) {
             if proposal.fitsInOneRequest {
-                Label("This lecture fits in one request", systemImage: "checkmark.circle")
+                Text("This lecture fits in one request")
                     .font(.headline)
-                Text("It comes to about \(proposal.estimatedTokens.formatted()) tokens, and \(proposal.model) takes about \(proposal.contextTokens.formatted()) at a time, so the \(proposal.detail.label) notes can be written in one request.")
+                Text("It is about \(proposal.estimatedTokens.formatted()) tokens, and \(proposal.model) reads about \(proposal.contextTokens.formatted()) at a time.")
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Label("This lecture is too long to send in one request", systemImage: "rectangle.split.3x1")
+                Text("This lecture is too long for one request")
                     .font(.headline)
-                Text("It comes to about \(proposal.estimatedTokens.formatted()) tokens, and \(proposal.model) takes about \(proposal.contextTokens.formatted()) at a time, including room for the notes. The \(proposal.detail.label) notes can be written in \(proposal.parts) parts and then combined: \(proposal.requests) requests instead of one. That takes longer, and with a paid service it costs more, mainly for the combining step and for any materials, which are sent with every part. A model with a larger context window needs fewer parts.")
+                Text("It is about \(proposal.estimatedTokens.formatted()) tokens, and \(proposal.model) reads about \(proposal.contextTokens.formatted()) at a time, including room for the notes.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("The \(proposal.detail.label) notes can be written in \(proposal.parts) parts and then combined, which is \(proposal.requests) requests. That takes longer and, on a paid service, costs more. A model with a larger context window needs fewer parts.")
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Don't ask again", isOn: $settings.stored.splitWithoutAsking)
             }
-            HStack {
+            HStack(spacing: Metrics.small) {
                 Button(proposal.fitsInOneRequest ? "Write \(proposal.detail.label) Notes" : "Write in \(proposal.parts) Parts") {
                     session.approveSplit(settings: settings)
                 }
@@ -402,8 +553,9 @@ private struct SplitProposalCard: View {
             }
             .disabled(session.isReplanning)
         }
-        .padding()
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 10))
+        .padding(Metrics.regular)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.panel, in: .rect(cornerRadius: Metrics.cornerRadius))
     }
 }
 
@@ -465,7 +617,7 @@ private struct MaterialsList: View {
                     }
                 }
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Metrics.tight) {
                     Label(document.name, systemImage: document.kind.symbol)
                     Text(details(for: document))
                         .font(.caption)
@@ -473,6 +625,7 @@ private struct MaterialsList: View {
                 }
             }
         }
+        .canvasBackground()
     }
 
     private func details(for document: LectureDocument) -> String {

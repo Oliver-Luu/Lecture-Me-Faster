@@ -36,6 +36,7 @@ struct ModelSwitcher: View {
                 }
             }
             .formStyle(.grouped)
+            .canvasBackground()
             if let actionTitle, let action {
                 HStack {
                     Spacer()
@@ -46,7 +47,7 @@ struct ModelSwitcher: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(problem != nil)
                 }
-                .padding([.horizontal, .bottom])
+                .padding([.horizontal, .bottom], Metrics.regular)
             }
         }
         .frame(width: 420)

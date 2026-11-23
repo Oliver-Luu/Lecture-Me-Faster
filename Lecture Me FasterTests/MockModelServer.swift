@@ -4,8 +4,9 @@ import Foundation
 ///
 /// Requests to a host passed to `start(host:responder:)` are answered here; all other requests are
 /// untouched. By default it answers like an OpenAI-compatible chat server, streaming "Reply N" for the
-/// Nth request; a `responder` can answer some requests itself (for example a model list). Each host has
-/// its own state, so suites using different hosts can run at the same time.
+/// Nth chat request; a `responder` can answer some requests itself (for example a model list), and those
+/// don't count as chat requests. Each host has its own state, so suites using different hosts can run at
+/// the same time.
 final class MockModelServer: URLProtocol, @unchecked Sendable {
     static let host = "mock-model.lecture-me-faster.test"
 
@@ -19,14 +20,24 @@ final class MockModelServer: URLProtocol, @unchecked Sendable {
         private let lock = NSLock()
         private var bodies: [String] = []
         private var urls: [URL] = []
+        private var chatBodies: [String] = []
         var requests: [String] { lock.withLock { bodies } }
         var requestURLs: [URL] { lock.withLock { urls } }
+        /// The requests answered with a chat reply (everything the `responder` didn't answer), in order.
+        var chats: [String] { lock.withLock { chatBodies } }
 
-        func record(_ request: URLRequest, body: String) -> Int {
+        func record(_ request: URLRequest, body: String) {
             lock.withLock {
                 bodies.append(body)
                 urls.append(request.url!)
-                return bodies.count
+            }
+        }
+
+        /// Counts a chat request and returns its number, starting at 1.
+        func recordChat(_ body: String) -> Int {
+            lock.withLock {
+                chatBodies.append(body)
+                return chatBodies.count
             }
         }
     }
@@ -78,15 +89,17 @@ final class MockModelServer: URLProtocol, @unchecked Sendable {
             return
         }
         let body = Self.body(of: request)
-        let number = server.log.record(request, body: body)
+        server.log.record(request, body: body)
         let status: Int, contentType: String, payload: String
         if let answer = server.responder?(request) {
             (status, contentType, payload) = (answer.status, "application/json", answer.body)
         } else if let text = server.chatResponder?(body) {
+            _ = server.log.recordChat(body)
             let content = String(decoding: try! JSONEncoder().encode(text), as: UTF8.self)
             let chunk = #"{"choices":[{"delta":{"content":\#(content)}}]}"#
             (status, contentType, payload) = (200, "text/event-stream", "data: \(chunk)\n\ndata: [DONE]\n\n")
         } else {
+            let number = server.log.recordChat(body)
             let chunk = #"{"choices":[{"delta":{"content":"Reply \#(number)"}}]}"#
             (status, contentType, payload) = (200, "text/event-stream", "data: \(chunk)\n\ndata: [DONE]\n\n")
         }

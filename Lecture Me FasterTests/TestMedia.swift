@@ -211,7 +211,8 @@ enum TestMedia {
     }
 
     /// Writes a silent video where each "slide" is a white frame with a dark band in a different place.
-    static func makeSlideVideo(slides: Int, secondsPerSlide: Int) async throws -> URL {
+    /// `blank` leaves the band out: a flat white picture with nothing on it to keep.
+    static func makeSlideVideo(slides: Int, secondsPerSlide: Int, blank: Bool = false) async throws -> URL {
         // Each slide is a dark band 100 px lower than the last, so only 3 fit in the 360 px frame.
         try #require(slides <= 3, "makeSlideVideo draws at most 3 slides; use makeDeckVideo for more")
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".mov")
@@ -241,12 +242,59 @@ enum TestMedia {
             let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
             let slide = frame / (secondsPerSlide * framesPerSecond)
             memset(base, 255, bytesPerRow * height)
-            memset(base + bytesPerRow * (40 + slide * 100), 20, bytesPerRow * 60)
+            if !blank { memset(base + bytesPerRow * (40 + slide * 100), 20, bytesPerRow * 60) }
             CVPixelBufferUnlockBaseAddress(buffer, [])
             adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: Int32(framesPerSecond)))
         }
         input.markAsFinished()
         await writer.finishWriting()
         return url
+    }
+
+    /// Writes `text` spoken by the system voice to an audio file, for tests that need real speech.
+    static func makeSpeech(_ text: String) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".caf")
+        let writer = SpeechWriter(url: url)
+        let synthesizer = AVSpeechSynthesizer()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            synthesizer.write(AVSpeechUtterance(string: text)) { buffer in
+                if let result = writer.take(buffer) { continuation.resume(with: result) }
+            }
+        }
+        writer.close()
+        return url
+    }
+
+    /// Collects the synthesizer's audio into a file. The last buffer it sends is empty.
+    private final class SpeechWriter: @unchecked Sendable {
+        private let url: URL
+        private var file: AVAudioFile?
+        private var isFinished = false
+
+        init(url: URL) { self.url = url }
+
+        /// Nil while more audio is coming; otherwise how the speech ended (reported once).
+        func take(_ buffer: AVAudioBuffer) -> Result<Void, any Error>? {
+            guard !isFinished, let audio = buffer as? AVAudioPCMBuffer else { return nil }
+            if audio.frameLength == 0 {
+                isFinished = true
+                return .success(())
+            }
+            do {
+                if file == nil {
+                    file = try AVAudioFile(
+                        forWriting: url, settings: audio.format.settings,
+                        commonFormat: audio.format.commonFormat, interleaved: audio.format.isInterleaved
+                    )
+                }
+                try file?.write(from: audio)
+                return nil
+            } catch {
+                isFinished = true
+                return .failure(error)
+            }
+        }
+
+        func close() { file = nil }
     }
 }

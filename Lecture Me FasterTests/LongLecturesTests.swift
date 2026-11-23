@@ -36,22 +36,23 @@ struct LongLecturesTests {
         #expect(LongLectures.ollamaContextLength(from: Data(#"{"details":{}}"#.utf8)) == nil)
     }
 
-    @Test func readsClaudeContextWindow() {
-        let model = Data(#"{"id":"claude-opus-5-5","max_input_tokens":1000000,"max_tokens":128000}"#.utf8)
-        #expect(LongLectures.claudeContextWindow(from: model) == 1_000_000)
-        #expect(LongLectures.claudeContextWindow(from: Data("{}".utf8)) == nil)
+    @Test func claudeUsesTheReportedWindowOrItsOwnFallback() {
+        #expect(LongLectures.contextWindow(provider: .claude, reported: 1_000_000, openAICompatibleSetting: 0) == 1_000_000)
+        #expect(LongLectures.contextWindow(provider: .claude, reported: nil, openAICompatibleSetting: 0) == LongLectures.claudeFallbackContextTokens)
     }
 
-    @Test func openAICompatibleServersUseTheSetting() async {
-        let config = AIConfiguration(provider: .openAICompatible, baseURL: URL(string: "http://127.0.0.1:9")!, model: "m", apiKey: "")
-        #expect(await LongLectures.contextWindow(for: config, openAICompatibleSetting: 16_384) == 16_384)
+    @Test func openAICompatibleServersUseTheListedWindowAndOtherwiseTheSetting() {
+        #expect(LongLectures.contextWindow(provider: .openAICompatible, reported: nil, openAICompatibleSetting: 16_384) == 16_384)
+        #expect(LongLectures.contextWindow(provider: .openAICompatible, reported: 0, openAICompatibleSetting: 16_384) == 16_384)
+        // A server that says (OpenRouter, Gemini) is believed over a setting left at another model's size.
+        #expect(LongLectures.contextWindow(provider: .openAICompatible, reported: 1_048_576, openAICompatibleSetting: 32_768) == 1_048_576)
     }
 
-    @Test func ollamaSettingIsUsedWithoutAskingTheServer() async {
-        // Port 9 answers nothing, so a result other than the fallback must come from the setting.
-        let config = AIConfiguration(provider: .ollama, baseURL: URL(string: "http://127.0.0.1:9")!, model: "nemotron3:33b-mlx", apiKey: "")
-        #expect(await LongLectures.contextWindow(for: config, openAICompatibleSetting: 0, ollamaSetting: 262_144) == 262_144)
-        #expect(await LongLectures.contextWindow(for: config, openAICompatibleSetting: 0) == LongLectures.fallbackContextTokens)
+    @Test func ollamaSettingWinsOverWhatTheModelReports() {
+        #expect(LongLectures.contextWindow(provider: .ollama, reported: 131_072, openAICompatibleSetting: 0, ollamaSetting: 262_144) == 262_144)
+        #expect(LongLectures.contextWindow(provider: .ollama, reported: nil, openAICompatibleSetting: 0) == LongLectures.fallbackContextTokens)
+        #expect(LongLectures.contextWindow(provider: .ollama, reported: 131_072, openAICompatibleSetting: 0) == 131_072)
+        #expect(LongLectures.contextWindow(provider: .ollama, reported: 2_000_000, openAICompatibleSetting: 0) == LongLectures.maxLocalContextTokens)
     }
 
     // MARK: Planning
@@ -150,6 +151,11 @@ struct LongLecturesTests {
 
     // MARK: The whole flow
 
+    /// The server's model list, which the app asks for once before writing; it says nothing about windows.
+    private static let modelList: MockModelServer.Responder = { request in
+        request.url?.path().hasSuffix("/models") == true ? (200, #"{"data":[{"id":"test-model"}]}"#) : nil
+    }
+
     /// An OpenAI-compatible server on a made-up host, answered inside the app by `MockModelServer`.
     private func settings(contextTokens: Int, splitWithoutAsking: Bool = false, detail: NoteDetail = .detailed) -> AppSettings {
         var stored = AppSettings.Stored()
@@ -178,7 +184,7 @@ struct LongLecturesTests {
     func aLongLectureAsksFirstThenWritesInPartsAndCombines(detail: NoteDetail) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "LongLecturesTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = MockModelServer.start()
+        let server = MockModelServer.start(responder: Self.modelList)
         defer { MockModelServer.stop() }
         let history = LectureHistory(root: root)
         let session = try lecture(transcript(100), history: history)  // ~30,000 tokens
@@ -189,7 +195,7 @@ struct LongLecturesTests {
         guard case .awaitingSplitApproval(let proposal) = session.phase else {
             Issue.record("Expected to be asked first, got \(session.phase)"); return
         }
-        #expect(server.requests.isEmpty, "Nothing is sent before the user agrees")
+        #expect(server.chats.isEmpty, "Nothing is sent before the user agrees")
         #expect(proposal.parts >= 3)
         #expect(proposal.requests == proposal.parts + 1)
         #expect(proposal.contextTokens == 16_384)
@@ -198,16 +204,16 @@ struct LongLecturesTests {
         session.approveSplit(settings: settings)
         try await waitUntilIdle(session)
         #expect(session.phase == .done)
-        #expect(server.requests.count == proposal.parts + 1, "One request per part, plus combining")
-        #expect(server.requests.dropLast().enumerated().allSatisfy { $1.contains("This is part \($0 + 1) of \(proposal.parts)") })
+        #expect(server.chats.count == proposal.parts + 1, "One request per part, plus combining")
+        #expect(server.chats.dropLast().enumerated().allSatisfy { $1.contains("This is part \($0 + 1) of \(proposal.parts)") })
         #expect(session.partProgress == nil)
 
         let notes = session.notes(for: detail)
         if LongLectures.combinesByRewriting(detail) {
-            #expect(server.requests.last?.contains("Combine them into one set of notes") == true)
+            #expect(server.chats.last?.contains("Combine them into one set of notes") == true)
             #expect(notes == "Reply \(proposal.parts + 1)", "The rewrite replaces the parts")
         } else {
-            #expect(server.requests.last?.contains("## Key takeaways") == true)
+            #expect(server.chats.last?.contains("## Key takeaways") == true)
             let expected = (1...proposal.parts).map { "Reply \($0)" }
             #expect(notes == LongLectures.joined(partNotes: expected, takeaways: "Reply \(proposal.parts + 1)"))
         }
@@ -219,7 +225,7 @@ struct LongLecturesTests {
     @Test func declining_leavesEverythingAsItWas() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "LongLecturesTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = MockModelServer.start()
+        let server = MockModelServer.start(responder: Self.modelList)
         defer { MockModelServer.stop() }
         let session = try lecture(transcript(100), history: LectureHistory(root: root))
 
@@ -228,33 +234,33 @@ struct LongLecturesTests {
         session.declineSplit()
         #expect(session.phase == .done)
         #expect(session.versions.isEmpty)
-        #expect(server.requests.isEmpty)
+        #expect(server.chats.isEmpty)
     }
 
     @Test func dontAskAgainSplitsStraightAway() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "LongLecturesTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = MockModelServer.start()
+        let server = MockModelServer.start(responder: Self.modelList)
         defer { MockModelServer.stop() }
         let session = try lecture(transcript(100), history: LectureHistory(root: root))
 
         session.resummarize(settings: settings(contextTokens: 16_384, splitWithoutAsking: true), detail: .detailed)
         try await waitUntilIdle(session)
         #expect(session.phase == .done)
-        #expect(server.requests.count > 2)
+        #expect(server.chats.count > 2)
     }
 
     @Test func aLectureThatFitsIsSentOnce() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "LongLecturesTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = MockModelServer.start()
+        let server = MockModelServer.start(responder: Self.modelList)
         defer { MockModelServer.stop() }
         let session = try lecture(transcript(5), history: LectureHistory(root: root))
 
         session.resummarize(settings: settings(contextTokens: 16_384), detail: .detailed)
         try await waitUntilIdle(session)
         #expect(session.phase == .done)
-        #expect(server.requests.count == 1)
+        #expect(server.chats.count == 1)
         #expect(session.notes(for: .detailed) == "Reply 1")
         #expect(session.versions.first?.parts == nil)
     }

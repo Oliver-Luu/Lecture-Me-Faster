@@ -13,7 +13,7 @@ struct SettingsView: View {
 
         NavigationStack {
             Form {
-                Section("AI model") {
+                Section("Model") {
                     AIModelFields(state: modelList, mode: .basic)
                 }
 
@@ -22,7 +22,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Notes")
                 } footer: {
-                    Text("You can also choose these when you add a lecture, and write notes at other levels later from a lecture's Notes tab.")
+                    Text("This is the level written first for a new lecture. Any other level can be written later from the lecture's Notes tab.")
                 }
 
                 LevelModelsSection()
@@ -57,7 +57,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Long lectures")
                     } footer: {
-                        Text("A lecture too long for the model's context window is written in parts and combined, which takes several requests. Normally the app asks first.")
+                        Text("A lecture too long for the model's context window is written in parts and then combined, which takes several requests. The app asks first unless this is on.")
                     }
 
                     Section {
@@ -65,15 +65,15 @@ struct SettingsView: View {
                     } header: {
                         Text("Faster or more accurate")
                     } footer: {
-                        Text("Balanced is the default and suits most lectures. Finding slides and reading their text work the same at every setting, because the faster and finer versions measured lost slides.")
+                        Text("Balanced suits most lectures. Slides are found and read the same way at every setting, because the faster and finer versions lost slides when measured.")
                     }
 
                     Section {
                         Toggle("Transcribe long recordings in pieces", isOn: $settings.stored.transcribeInPieces)
                     } header: {
-                        Text("Speed")
+                        Text("Transcription")
                     } footer: {
-                        Text("A long recording's audio is split at pauses into up to 4 pieces transcribed at once, about 3 times faster with the same accuracy in testing. A few words can come out differently from one run to the next. Turn off to transcribe in one pass, which gives the same transcript every time. Slides are always found in parallel; that gives the same result either way.")
+                        Text("Splits a long recording at pauses into up to 4 pieces and transcribes them together, about 3 times faster with the same accuracy in testing. A few words can differ from one run to the next. Turn this off for one pass that gives the same transcript every time.")
                     }
 
                     Section {
@@ -86,11 +86,12 @@ struct SettingsView: View {
                     } header: {
                         Text("Slides")
                     } footer: {
-                        Text("Every distinct slide in a video is kept (up to 1,000 per recording, more for very long ones). Up to this many go to the model as pictures in each request, choosing the ones with the most diagrams; the rest go as the text on them, so none is left out. A long lecture written in several requests gets this many pictures in each one. Models that can't see images get every slide as text, plus a short description when Apple Intelligence is on. Fewer images cost less on paid APIs and run faster on local models.")
+                        Text("Every distinct slide in a video is kept. Up to this many go to the model as pictures in each request, starting with the ones that have the most diagrams. The rest go as the text on them, so none is left out. Models that can't see images get every slide as text, plus a short description when Apple Intelligence is on. Fewer pictures cost less on paid services and run faster on local models.")
                     }
                 }
             }
             .formStyle(.grouped)
+            .canvasBackground()
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
